@@ -27,7 +27,7 @@ export class MeetingView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Meeting Notes";
+    return "Alembic";
   }
 
   getIcon(): string {

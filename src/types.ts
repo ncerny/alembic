@@ -65,4 +65,4 @@ export interface MeetingData {
   date: string;
 }
 
-export const MEETING_VIEW_TYPE = "meeting-notes-view";
+export const MEETING_VIEW_TYPE = "alembic-view";

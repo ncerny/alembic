@@ -24,7 +24,7 @@ export default class MeetingNotesPlugin extends Plugin {
     );
 
     // Ribbon icon to open the meeting panel
-    this.addRibbonIcon("mic", "Open Meeting Notes", () => {
+    this.addRibbonIcon("mic", "Open Alembic", () => {
       this.activateView();
     });
 

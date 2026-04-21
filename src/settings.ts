@@ -18,7 +18,7 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Meeting Notes Settings" });
+    containerEl.createEl("h2", { text: "Alembic Settings" });
 
     // LLM Model selection
     new Setting(containerEl)

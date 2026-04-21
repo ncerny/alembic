@@ -1,9 +1,9 @@
 {
-  "id": "obsidian-meeting-notes",
-  "name": "Meeting Notes",
+  "id": "alembic",
+  "name": "Alembic",
   "version": "0.1.0",
   "minAppVersion": "1.0.0",
-  "description": "automatic meeting notes: capture audio, transcribe locally with Whisper, and generate AI-powered summaries via GitHub Copilot.",
+  "description": "Distill meetings into knowledge: capture audio, transcribe locally with Whisper, and generate AI-powered summaries via GitHub Copilot.",
   "author": "ncerny",
   "isDesktopOnly": true
 }

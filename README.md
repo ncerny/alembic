@@ -1,6 +1,6 @@
-# Obsidian Meeting Notes
+# Alembic
 
-A automatic meeting notes plugin for Obsidian. Capture audio directly from Microsoft Teams (or any app), transcribe locally with Whisper, and generate AI-powered summaries using GitHub Copilot — all without leaving Obsidian.
+Distill meetings into knowledge. Capture audio directly from Microsoft Teams (or any app), transcribe locally with Whisper, and generate AI-powered summaries using GitHub Copilot — all without leaving Obsidian.
 
 ## How It Works
 
@@ -26,6 +26,7 @@ A automatic meeting notes plugin for Obsidian. Capture audio directly from Micro
 ```
 
 **Key features:**
+
 - 🎙 **No bot, no virtual audio device** — uses macOS ScreenCaptureKit to capture audio directly from Teams, Zoom, or any app
 - 🔒 **Privacy-first** — audio is transcribed locally with Whisper; only text is sent to the LLM
 - ✍️ **Human-AI hybrid** — jot notes during the meeting to guide what the AI focuses on
@@ -35,21 +36,21 @@ A automatic meeting notes plugin for Obsidian. Capture audio directly from Micro
 
 ## Prerequisites
 
-| Requirement | How to install |
-|---|---|
-| **macOS 13+** (Ventura or later) | Required for ScreenCaptureKit |
-| **Xcode Command Line Tools** | `xcode-select --install` |
-| **Whisper.cpp** | `brew install whisper-cpp` |
-| **GitHub Copilot CLI** | `gh extension install github/gh-copilot` |
-| **GitHub Copilot license** | [github.com/features/copilot](https://github.com/features/copilot) |
+| Requirement                      | How to install                                                     |
+| -------------------------------- | ------------------------------------------------------------------ |
+| **macOS 13+** (Ventura or later) | Required for ScreenCaptureKit                                      |
+| **Xcode Command Line Tools**     | `xcode-select --install`                                           |
+| **Whisper.cpp**                  | `brew install whisper-cpp`                                         |
+| **GitHub Copilot CLI**           | `gh extension install github/gh-copilot`                           |
+| **GitHub Copilot license**       | [github.com/features/copilot](https://github.com/features/copilot) |
 
 ## Installation
 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/obsidian-meeting-notes.git
-cd obsidian-meeting-notes
+git clone https://github.com/ncerny/alembic.git
+cd alembic
 ```
 
 ### 2. Install dependencies and build
@@ -75,7 +76,7 @@ Copy the plugin files to your vault's plugin directory:
 
 ```bash
 VAULT_PATH="$HOME/path-to-your-vault"
-PLUGIN_DIR="$VAULT_PATH/.obsidian/plugins/obsidian-meeting-notes"
+PLUGIN_DIR="$VAULT_PATH/.obsidian/plugins/alembic"
 
 mkdir -p "$PLUGIN_DIR"
 cp main.js manifest.json styles.css "$PLUGIN_DIR/"
@@ -86,7 +87,7 @@ cp build/audio-capture "$PLUGIN_DIR/"
 
 1. Open Obsidian → Settings → Community Plugins
 2. Turn off **Restricted Mode** if prompted
-3. Find **Meeting Notes** in the list and enable it
+3. Find **Alembic** in the list and enable it
 
 ### 6. Grant permissions
 
@@ -100,7 +101,7 @@ On first use, macOS will prompt you to grant **Screen Recording** permission to 
 
 ### Recording a meeting
 
-1. **Open the meeting panel** — click the 🎙 microphone icon in the left ribbon, or use the command palette: `Meeting Notes: Open meeting panel`
+1. **Open the meeting panel** — click the 🎙 microphone icon in the left ribbon, or use the command palette: `Alembic: Open meeting panel`
 2. **Start your Teams/Zoom call** as normal
 3. **Click Record** — the plugin captures audio from the target app (default: Microsoft Teams)
 4. **Take notes** — jot down key points in the notes area during the meeting. These guide what the AI focuses on in the summary.
@@ -117,10 +118,10 @@ The plugin creates a note like `Meetings/2026-04-21 Sprint Planning.md`:
 ---
 type: meeting
 date: 2026-04-21
-title: "Sprint Planning - Q2 Goals"
+title: 'Sprint Planning - Q2 Goals'
 attendees:
-  - "[[Jane Doe]]"
-  - "[[Bob Smith]]"
+  - '[[Jane Doe]]'
+  - '[[Bob Smith]]'
 tags: [meeting, sprint-planning, q2-goals]
 duration: 45min
 ---
@@ -128,57 +129,63 @@ duration: 45min
 # Sprint Planning - Q2 Goals
 
 ## Summary
+
 The team discussed Q2 priorities and agreed to focus on...
 
 ## Key Decisions
+
 - Prioritize the API redesign over the dashboard overhaul
 - Hire two additional engineers by end of May
 
 ## Action Items
+
 - [ ] [[Jane Doe]]: Draft Q2 roadmap (due: 2026-04-28)
 - [ ] [[Bob Smith]]: Review budget allocation (due: 2026-04-25)
 
 ## My Notes
+
 Your notes from during the meeting appear here...
 
 ## Transcript
+
 <details>
 <summary>Full transcript (click to expand)</summary>
 
 [00:00] So let's get started with the sprint planning...
 [00:15] I think we should focus on the API first...
+
 </details>
 ```
 
 ### Command palette
 
-| Command | Description |
-|---|---|
-| `Open meeting panel` | Open the sidebar meeting view |
-| `Start meeting recording` | Begin capturing audio |
+| Command                             | Description                              |
+| ----------------------------------- | ---------------------------------------- |
+| `Open meeting panel`                | Open the sidebar meeting view            |
+| `Start meeting recording`           | Begin capturing audio                    |
 | `Stop recording and generate notes` | Stop, transcribe, summarize, create note |
 
 ---
 
 ## Configuration
 
-Open Settings → Meeting Notes:
+Open Settings → Alembic:
 
-| Setting | Description | Default |
-|---|---|---|
-| **Copilot model** | LLM model for summarization | `gpt-4o-mini` |
-| **Target application** | App to capture audio from | `Microsoft Teams` |
-| **Output folder** | Where meeting notes are created | `Meetings` |
-| **Whisper model size** | Transcription accuracy vs. speed | `base` |
+| Setting                | Description                      | Default           |
+| ---------------------- | -------------------------------- | ----------------- |
+| **Copilot model**      | LLM model for summarization      | `gpt-4o-mini`     |
+| **Target application** | App to capture audio from        | `Microsoft Teams` |
+| **Output folder**      | Where meeting notes are created  | `Meetings`        |
+| **Whisper model size** | Transcription accuracy vs. speed | `base`            |
 
 ### Whisper model sizes
 
-| Model | Size | Speed | Accuracy |
-|---|---|---|---|
-| `tiny` | ~75MB | Fastest | Lower |
-| `base` | ~150MB | Fast | Good |
-| `small` | ~500MB | Medium | Better |
-| `medium` | ~1.5GB | Slow | Best |
+| Model    | Size   | Speed   | Accuracy |
+| -------- | ------ | ------- | -------- |
+| `tiny`   | ~75MB  | Fastest | Lower    |
+| `base`   | ~150MB | Fast    | Good     |
+| `small`  | ~500MB | Medium  | Better   |
+| `medium` | ~1.5GB | Slow    | Best     |
 
 The Whisper model is downloaded automatically on first use.
 
@@ -187,7 +194,7 @@ The Whisper model is downloaded automatically on first use.
 ## Architecture
 
 ```
-obsidian-meeting-notes/
+alembic/
 ├── main.ts                      # Plugin entry point
 ├── src/
 │   ├── types.ts                 # Shared types & interfaces
@@ -217,11 +224,11 @@ obsidian-meeting-notes/
 
 ### Privacy model
 
-| Data | Where it goes |
-|---|---|
-| Audio | Stays on your machine. Deleted after transcription. |
-| Transcript text | Sent to GitHub Copilot LLM for summarization |
-| Meeting notes | Stored in your Obsidian vault (local files) |
+| Data            | Where it goes                                       |
+| --------------- | --------------------------------------------------- |
+| Audio           | Stays on your machine. Deleted after transcription. |
+| Transcript text | Sent to GitHub Copilot LLM for summarization        |
+| Meeting notes   | Stored in your Obsidian vault (local files)         |
 
 ---
 

@@ -66,7 +66,7 @@ export class MeetingController {
 
     const targetApp = this.plugin.settings.targetApp;
     if (!targetApp) {
-      new Notice("Please set a target application in Meeting Notes settings");
+      new Notice("Please set a target application in Alembic settings");
       return;
     }
 
@@ -214,6 +214,6 @@ export class MeetingController {
   private getPluginDir(): string {
     const adapter = this.plugin.app.vault.adapter as any;
     const basePath = adapter.getBasePath?.() || "";
-    return `${basePath}/.obsidian/plugins/obsidian-meeting-notes`;
+    return `${basePath}/.obsidian/plugins/alembic`;
   }
 }

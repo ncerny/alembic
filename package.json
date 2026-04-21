@@ -1,13 +1,13 @@
 {
-  "name": "obsidian-meeting-notes",
+  "name": "alembic",
   "version": "0.1.0",
-  "description": "automatic meeting notes plugin for Obsidian",
+  "description": "Distill meetings into knowledge — automatic meeting notes for Obsidian",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production"
   },
-  "keywords": ["obsidian", "meeting-notes", "transcription", "whisper", "copilot"],
+  "keywords": ["obsidian", "alembic", "meeting-notes", "transcription", "whisper", "copilot"],
   "author": "ncerny",
   "license": "MIT",
   "devDependencies": {
