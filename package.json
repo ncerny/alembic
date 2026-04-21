@@ -1,0 +1,24 @@
+{
+  "name": "obsidian-meeting-notes",
+  "version": "0.1.0",
+  "description": "automatic meeting notes plugin for Obsidian",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": ["obsidian", "meeting-notes", "transcription", "whisper", "copilot"],
+  "author": "ncerny",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "latest",
+    "typescript": "^5.6.0",
+    "tslib": "^2.7.0",
+    "builtin-modules": "^4.0.0"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "latest"
+  }
+}

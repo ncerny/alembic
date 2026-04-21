@@ -1,0 +1,133 @@
+/* Meeting Notes plugin styles */
+
+.meeting-view-container {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+.meeting-view-container .meeting-title-input {
+  width: 100%;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+.meeting-view-container .recording-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.meeting-view-container .recording-timer {
+  font-family: var(--font-monospace);
+  font-size: 1.2em;
+  color: var(--text-muted);
+}
+
+.meeting-view-container .recording-timer.is-recording {
+  color: var(--color-red);
+}
+
+.meeting-view-container .status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  background: var(--background-modifier-hover);
+}
+
+.meeting-view-container .status-indicator .status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.meeting-view-container .status-indicator .status-dot.idle {
+  background: var(--text-muted);
+}
+
+.meeting-view-container .status-indicator .status-dot.recording {
+  background: var(--color-red);
+  animation: pulse 1.5s infinite;
+}
+
+.meeting-view-container .status-indicator .status-dot.processing {
+  background: var(--color-yellow);
+  animation: pulse 1s infinite;
+}
+
+.meeting-view-container .status-indicator .status-dot.done {
+  background: var(--color-green);
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.meeting-view-container .notes-area {
+  flex: 1;
+  min-height: 200px;
+  resize: vertical;
+  font-family: var(--font-text);
+  padding: 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
+.meeting-view-container .notes-area::placeholder {
+  color: var(--text-faint);
+}
+
+.meeting-view-container .progress-container {
+  display: none;
+}
+
+.meeting-view-container .progress-container.visible {
+  display: block;
+}
+
+.meeting-view-container .progress-bar {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.meeting-view-container .progress-bar-fill {
+  height: 100%;
+  background: var(--interactive-accent);
+  transition: width 0.3s ease;
+  border-radius: 3px;
+}
+
+.meeting-view-container .progress-label {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.meeting-view-container .device-indicator {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.meeting-view-container .action-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.meeting-view-container .enhance-btn {
+  flex: 1;
+}

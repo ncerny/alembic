@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+main.js
+dist/
+
+# Obsidian
+data.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Whisper binaries (downloaded at runtime)
+whisper/
+
+# Temp audio files
+*.wav
+*.tmp
+
+# Tracking
+.copilot-tracking/
