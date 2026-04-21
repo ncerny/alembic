@@ -35,34 +35,17 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
         });
       });
 
-    // Audio device selection
+    // Target application
     new Setting(containerEl)
-      .setName("Audio input device")
-      .setDesc("Select the audio device to capture (e.g., BlackHole for system audio)")
-      .addDropdown(async (dropdown) => {
-        dropdown.addOption("", "Loading devices...");
-
-        try {
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const audioInputs = devices.filter((d) => d.kind === "audioinput");
-
-          dropdown.selectEl.empty();
-          dropdown.addOption("", "Select a device...");
-
-          for (const device of audioInputs) {
-            const label = device.label || `Device ${device.deviceId.slice(0, 8)}`;
-            dropdown.addOption(device.deviceId, label);
-          }
-
-          dropdown.setValue(this.plugin.settings.audioDeviceId);
-          dropdown.onChange(async (value) => {
-            this.plugin.settings.audioDeviceId = value;
-            await this.plugin.saveSettings();
-          });
-        } catch {
-          dropdown.selectEl.empty();
-          dropdown.addOption("", "Microphone access denied");
-        }
+      .setName("Target application")
+      .setDesc("Application to capture audio from (e.g., Microsoft Teams, Zoom)")
+      .addText((text) => {
+        text.setPlaceholder("Microsoft Teams");
+        text.setValue(this.plugin.settings.targetApp);
+        text.onChange(async (value) => {
+          this.plugin.settings.targetApp = value || "Microsoft Teams";
+          await this.plugin.saveSettings();
+        });
       });
 
     // Output folder
@@ -102,16 +85,13 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
       <p><strong>Prerequisites:</strong></p>
       <ol>
         <li><strong>GitHub Copilot CLI</strong> — Install and authenticate: <code>gh extension install github/gh-copilot</code></li>
-        <li><strong>BlackHole</strong> (macOS) — Install for system audio capture: <code>brew install blackhole-2ch</code></li>
-        <li><strong>Whisper.cpp</strong> — Downloaded automatically on first use</li>
+        <li><strong>Whisper.cpp</strong> — Install via: <code>brew install whisper-cpp</code></li>
+        <li><strong>Audio capture helper</strong> — Build the Swift helper: <code>cd swift-helper && bash build.sh</code></li>
+        <li><strong>Screen Recording permission</strong> — macOS will prompt on first capture</li>
       </ol>
-      <p><strong>Audio routing (macOS):</strong></p>
-      <ol>
-        <li>Open <em>Audio MIDI Setup</em></li>
-        <li>Create a <em>Multi-Output Device</em> with your speakers + BlackHole</li>
-        <li>Set it as your system output</li>
-        <li>Select "BlackHole 2ch" as the audio input device above</li>
-      </ol>
+      <p><strong>How it works:</strong></p>
+      <p>The plugin uses macOS ScreenCaptureKit to capture audio directly from the target application (e.g., Teams). 
+      No virtual audio device needed — just grant Screen Recording permission when prompted.</p>
     `;
   }
 }

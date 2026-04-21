@@ -1,129 +1,153 @@
-import type { TranscriptSegment } from "./types";
+import { execFile, spawn, type ChildProcess } from "child_process";
+import { existsSync } from "fs";
+import { join } from "path";
+import { promisify } from "util";
+
+const execFileAsync = promisify(execFile);
 
 export class AudioCapture {
-  private mediaRecorder: MediaRecorder | null = null;
-  private audioChunks: Blob[] = [];
-  private stream: MediaStream | null = null;
+  private captureProcess: ChildProcess | null = null;
   private startTime = 0;
   private _duration = 0;
   private timerInterval: number | null = null;
   private onDurationUpdate: ((seconds: number) => void) | null = null;
+  private _isRecording = false;
+  private outputPath = "";
+  private helperPath: string;
 
-  get isRecording(): boolean {
-    return this.mediaRecorder?.state === "recording";
+  constructor(pluginDir: string) {
+    this.helperPath = join(pluginDir, "audio-capture");
   }
 
-  get isPaused(): boolean {
-    return this.mediaRecorder?.state === "paused";
+  get isRecording(): boolean {
+    return this._isRecording;
   }
 
   get duration(): number {
     return this._duration;
   }
 
+  isHelperInstalled(): boolean {
+    return existsSync(this.helperPath);
+  }
+
+  async listApps(): Promise<{ pid: number; name: string }[]> {
+    if (!this.isHelperInstalled()) {
+      throw new Error("audio-capture helper not found. Build with: cd swift-helper && bash build.sh");
+    }
+
+    const { stdout } = await execFileAsync(this.helperPath, ["list"]);
+    return stdout
+      .trim()
+      .split("\n")
+      .filter((line) => line.includes("\t"))
+      .map((line) => {
+        const [pid, ...nameParts] = line.split("\t");
+        return { pid: parseInt(pid), name: nameParts.join("\t") };
+      });
+  }
+
   async start(
-    deviceId: string,
+    appName: string,
+    outputPath: string,
     onDurationUpdate?: (seconds: number) => void,
   ): Promise<void> {
+    if (this._isRecording) {
+      throw new Error("Already recording");
+    }
+
+    if (!this.isHelperInstalled()) {
+      throw new Error(
+        "audio-capture helper not found.\n" +
+        "Build it: cd swift-helper && bash build.sh\n" +
+        "Then copy build/audio-capture to the plugin directory."
+      );
+    }
+
     this.onDurationUpdate = onDurationUpdate ?? null;
-    this.audioChunks = [];
+    this.outputPath = outputPath;
 
-    const constraints: MediaStreamConstraints = {
-      audio: deviceId
-        ? { deviceId: { exact: deviceId } }
-        : true,
-    };
-
-    this.stream = await navigator.mediaDevices.getUserMedia(constraints);
-
-    this.mediaRecorder = new MediaRecorder(this.stream, {
-      mimeType: this.getSupportedMimeType(),
-    });
-
-    this.mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        this.audioChunks.push(event.data);
-      }
-    };
-
-    this.mediaRecorder.start(1000); // collect in 1-second chunks
-    this.startTime = Date.now();
-    this._duration = 0;
-
-    this.timerInterval = window.setInterval(() => {
-      this._duration = Math.floor((Date.now() - this.startTime) / 1000);
-      this.onDurationUpdate?.(this._duration);
-    }, 1000);
-  }
-
-  pause(): void {
-    if (this.mediaRecorder?.state === "recording") {
-      this.mediaRecorder.pause();
-      if (this.timerInterval) {
-        window.clearInterval(this.timerInterval);
-        this.timerInterval = null;
-      }
-    }
-  }
-
-  resume(): void {
-    if (this.mediaRecorder?.state === "paused") {
-      this.mediaRecorder.resume();
-      this.startTime = Date.now() - this._duration * 1000;
-      this.timerInterval = window.setInterval(() => {
-        this._duration = Math.floor((Date.now() - this.startTime) / 1000);
-        this.onDurationUpdate?.(this._duration);
-      }, 1000);
-    }
-  }
-
-  async stop(): Promise<Blob> {
     return new Promise((resolve, reject) => {
-      if (!this.mediaRecorder) {
-        reject(new Error("No active recording"));
-        return;
-      }
+      this.captureProcess = spawn(this.helperPath, [
+        "capture",
+        "--app", appName,
+        "--output", outputPath,
+      ]);
 
-      this.mediaRecorder.onstop = () => {
-        const blob = new Blob(this.audioChunks, {
-          type: this.mediaRecorder?.mimeType ?? "audio/webm",
-        });
+      let started = false;
+
+      this.captureProcess.stdout?.on("data", (data: Buffer) => {
+        const text = data.toString().trim();
+        if (text === "RECORDING" && !started) {
+          started = true;
+          this._isRecording = true;
+          this.startTime = Date.now();
+          this._duration = 0;
+
+          this.timerInterval = window.setInterval(() => {
+            this._duration = Math.floor((Date.now() - this.startTime) / 1000);
+            this.onDurationUpdate?.(this._duration);
+          }, 1000);
+
+          resolve();
+        }
+      });
+
+      this.captureProcess.stderr?.on("data", (data: Buffer) => {
+        console.log(`[audio-capture] ${data.toString().trim()}`);
+      });
+
+      this.captureProcess.on("error", (err) => {
+        if (!started) reject(err);
+      });
+
+      this.captureProcess.on("exit", (code) => {
+        if (!started) {
+          reject(new Error(`audio-capture exited with code ${code}`));
+        }
         this.cleanup();
-        resolve(blob);
-      };
+      });
 
-      this.mediaRecorder.onerror = (event) => {
-        this.cleanup();
-        reject(new Error(`Recording error: ${event}`));
-      };
+      setTimeout(() => {
+        if (!started) {
+          this.captureProcess?.kill();
+          reject(new Error("audio-capture timed out starting"));
+        }
+      }, 10000);
+    });
+  }
 
-      this.mediaRecorder.stop();
+  async stop(): Promise<string> {
+    if (!this._isRecording || !this.captureProcess) {
+      throw new Error("No active recording");
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.captureProcess?.kill("SIGKILL");
+        reject(new Error("audio-capture did not stop gracefully"));
+      }, 5000);
+
+      this.captureProcess!.stdout?.on("data", (data: Buffer) => {
+        if (data.toString().trim() === "STOPPED") {
+          clearTimeout(timeout);
+          this.cleanup();
+          resolve(this.outputPath);
+        }
+      });
+
+      // Send SIGINT to stop capture gracefully
+      this.captureProcess!.kill("SIGINT");
     });
   }
 
   private cleanup(): void {
+    this._isRecording = false;
     if (this.timerInterval) {
       window.clearInterval(this.timerInterval);
       this.timerInterval = null;
     }
-    if (this.stream) {
-      this.stream.getTracks().forEach((track) => track.stop());
-      this.stream = null;
-    }
-    this.mediaRecorder = null;
-  }
-
-  private getSupportedMimeType(): string {
-    const types = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg"];
-    for (const type of types) {
-      if (MediaRecorder.isTypeSupported(type)) return type;
-    }
-    return "audio/webm";
-  }
-
-  static async getAudioDevices(): Promise<MediaDeviceInfo[]> {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    return devices.filter((d) => d.kind === "audioinput");
+    this.captureProcess = null;
   }
 }
 

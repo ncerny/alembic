@@ -73,10 +73,8 @@ export class MeetingView extends ItemView {
 
     // Device indicator
     const deviceIndicator = container.createDiv({ cls: "device-indicator" });
-    const deviceName = this.plugin.settings.audioDeviceId
-      ? "Selected device"
-      : "No device selected";
-    deviceIndicator.setText(`🎙 ${deviceName}`);
+    const appName = this.plugin.settings.targetApp || "No app selected";
+    deviceIndicator.setText(`🎙 Capturing: ${appName}`);
 
     // Notes area
     container.createEl("label", {

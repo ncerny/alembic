@@ -25,7 +25,7 @@ export class MeetingController {
 
   constructor(plugin: MeetingNotesPlugin) {
     this.plugin = plugin;
-    this.audioCapture = new AudioCapture();
+    this.audioCapture = new AudioCapture(this.getPluginDir());
     this.transcriber = new Transcriber(this.getPluginDir());
   }
 
@@ -64,14 +64,20 @@ export class MeetingController {
       return;
     }
 
-    const deviceId = this.plugin.settings.audioDeviceId;
-    if (!deviceId) {
-      new Notice("Please select an audio device in Meeting Notes settings");
+    const targetApp = this.plugin.settings.targetApp;
+    if (!targetApp) {
+      new Notice("Please set a target application in Meeting Notes settings");
+      return;
+    }
+
+    if (!this.audioCapture.isHelperInstalled()) {
+      new Notice("Audio capture helper not found. Build it: cd swift-helper && bash build.sh");
       return;
     }
 
     try {
-      await this.audioCapture.start(deviceId, (seconds) => {
+      const tempPath = `${this.getPluginDir()}/temp/recording-${Date.now()}.wav`;
+      await this.audioCapture.start(targetApp, tempPath, (seconds) => {
         this.durationListeners.forEach((l) => l(seconds));
       });
       this.setState("recording");
@@ -83,18 +89,15 @@ export class MeetingController {
   }
 
   pauseRecording(): void {
-    if (this.audioCapture.isRecording) {
-      this.audioCapture.pause();
-    } else if (this.audioCapture.isPaused) {
-      this.audioCapture.resume();
-    }
+    // Pause not supported with ScreenCaptureKit helper
+    new Notice("Pause not supported — stop and restart instead");
   }
 
   async stopAndProcess(
     meetingTitle: string,
     userNotes: string,
   ): Promise<void> {
-    if (!this.audioCapture.isRecording && !this.audioCapture.isPaused) {
+    if (!this.audioCapture.isRecording) {
       new Notice("No active recording");
       return;
     }
@@ -102,15 +105,15 @@ export class MeetingController {
     const recordingDuration = this.audioCapture.duration;
 
     try {
-      // Stop recording
+      // Stop recording — returns the WAV file path
       this.emitProgress("Stopping recording...");
-      const audioBlob = await this.audioCapture.stop();
+      const wavPath = await this.audioCapture.stop();
 
-      // Transcribe
+      // Transcribe from WAV file path
       this.setState("transcribing");
       this.emitProgress("Transcribing audio...");
-      this.lastTranscript = await this.transcriber.transcribe(
-        audioBlob,
+      this.lastTranscript = await this.transcriber.transcribeFile(
+        wavPath,
         this.plugin.settings.whisperModelSize,
         (msg) => this.emitProgress(msg),
       );

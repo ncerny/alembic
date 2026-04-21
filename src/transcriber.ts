@@ -103,6 +103,53 @@ export class Transcriber {
     return this.whisperManager;
   }
 
+  async transcribeFile(
+    wavPath: string,
+    modelSize: WhisperModelSize,
+    onProgress?: (message: string) => void,
+  ): Promise<TranscriptSegment[]> {
+    // Ensure dependencies
+    await this.whisperManager.ensureBinary(onProgress);
+    await this.whisperManager.ensureModel(modelSize, onProgress);
+
+    onProgress?.("Transcribing audio...");
+
+    const tempVtt = wavPath.replace(/\.wav$/, ".vtt");
+
+    try {
+      // Run whisper directly on the WAV file
+      await execFileAsync(
+        this.whisperManager.binaryPath,
+        [
+          "-m", this.whisperManager.modelPath(modelSize),
+          "-f", wavPath,
+          "--output-vtt",
+          "--output-file", wavPath.replace(/\.wav$/, ""),
+          "--no-prints",
+        ],
+        { maxBuffer: 50 * 1024 * 1024 },
+      );
+
+      onProgress?.("Parsing transcript...");
+
+      if (!existsSync(tempVtt)) {
+        throw new Error("Whisper did not produce VTT output");
+      }
+
+      const vttContent = readFileSync(tempVtt, "utf-8");
+      return this.parseVTT(vttContent);
+    } finally {
+      // Cleanup temp files
+      for (const f of [wavPath, tempVtt]) {
+        try {
+          if (existsSync(f)) unlinkSync(f);
+        } catch {
+          // ignore cleanup errors
+        }
+      }
+    }
+  }
+
   async transcribe(
     audioBlob: Blob,
     modelSize: WhisperModelSize,

@@ -1,6 +1,6 @@
 export interface MeetingNotesSettings {
   model: string;
-  audioDeviceId: string;
+  targetApp: string;
   outputFolder: string;
   whisperModelSize: WhisperModelSize;
 }
@@ -9,7 +9,7 @@ export type WhisperModelSize = "tiny" | "base" | "small" | "medium";
 
 export const DEFAULT_SETTINGS: MeetingNotesSettings = {
   model: "gpt-4o-mini",
-  audioDeviceId: "",
+  targetApp: "Microsoft Teams",
   outputFolder: "Meetings",
   whisperModelSize: "base",
 };
