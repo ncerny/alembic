@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting } from "obsidian";
 import type MeetingNotesPlugin from "../main";
 import type { MeetingNotesSettings } from "./types";
 
@@ -67,44 +67,23 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
     // --- Microsoft 365 Integration ---
     containerEl.createEl("h3", { text: "Microsoft 365 Integration" });
 
-    const calendarSync = this.plugin.calendarSync;
-    const m365Auth = calendarSync.getAuth();
-
-    if (calendarSync.isConfigured()) {
-      const statusRow = new Setting(containerEl)
-        .setName("Microsoft 365 connection")
-        .setDesc("✅ Connected — calendar events will sync automatically");
-      statusRow.addButton((btn) => {
-        btn.setButtonText("Disconnect")
-          .setWarning()
-          .onClick(() => {
-            m365Auth.logout();
-            new Notice("Disconnected from Microsoft 365");
-            this.display();
-          });
-      });
-    } else {
-      new Setting(containerEl)
-        .setName("Microsoft 365 connection")
-        .setDesc("Sign in to pull calendar events and meeting attendees")
-        .addButton((btn) => {
-          btn.setButtonText("Connect to M365")
-            .setCta()
-            .onClick(async () => {
-              btn.setButtonText("Signing in…").setDisabled(true);
-              try {
-                await m365Auth.startLogin();
-                await calendarSync.refresh();
-                new Notice("✅ Connected to Microsoft 365");
-                this.display();
-              } catch (err) {
-                const msg = err instanceof Error ? err.message : String(err);
-                new Notice(`M365 login failed: ${msg}`, 8000);
-                btn.setButtonText("Connect to M365").setDisabled(false);
-              }
-            });
+    new Setting(containerEl)
+      .setName("Calendar flow URL")
+      .setDesc(
+        "Paste the HTTP POST URL from your Power Automate flow. " +
+        "The flow should use the Office 365 Outlook connector to return calendar events.",
+      )
+      .addText((text) => {
+        text.setPlaceholder("https://prod-xx.westus.logic.azure.com/...");
+        text.setValue(this.plugin.settings.calendarFlowUrl || "");
+        text.inputEl.type = "password";
+        text.inputEl.style.width = "100%";
+        text.onChange(async (value) => {
+          this.plugin.settings.calendarFlowUrl = value || undefined;
+          await this.plugin.saveSettings();
+          this.plugin.updateAgent();
         });
-    }
+      });
 
     // People folder
     new Setting(containerEl)

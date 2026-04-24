@@ -1,12 +1,10 @@
 import type { App } from "obsidian";
-import type { M365Auth } from "./m365-auth";
-import { GraphClient } from "./graph-client";
+import { CalendarAgent } from "./calendar-agent";
 import { PeopleManager } from "./people-manager";
 import type { CalendarEvent, GraphAttendee } from "./types";
 
 export class CalendarSync {
-  private auth: M365Auth;
-  private graphClient: GraphClient;
+  private agent: CalendarAgent;
   private peopleManager: PeopleManager;
   private app: App;
   private events: CalendarEvent[] = [];
@@ -14,10 +12,9 @@ export class CalendarSync {
   private listeners: ((events: CalendarEvent[]) => void)[] = [];
   private _connected = false;
 
-  constructor(auth: M365Auth, app: App, peopleFolderPath: string) {
-    this.auth = auth;
+  constructor(agent: CalendarAgent, app: App, peopleFolderPath: string) {
+    this.agent = agent;
     this.app = app;
-    this.graphClient = new GraphClient(auth);
     this.peopleManager = new PeopleManager(app, peopleFolderPath);
   }
 
@@ -41,7 +38,7 @@ export class CalendarSync {
    */
   async refresh(): Promise<CalendarEvent[]> {
     try {
-      this.events = await this.graphClient.getCalendarView();
+      this.events = await this.agent.getCalendarEvents();
       this.lastFetch = Date.now();
       this._connected = true;
 
@@ -125,15 +122,11 @@ export class CalendarSync {
    * Whether the user has logged in (has a refresh token).
    */
   isConfigured(): boolean {
-    return this.auth.hasRefreshToken();
+    return this.agent.isConfigured();
   }
 
   updatePeopleFolderPath(path: string): void {
     this.peopleManager = new PeopleManager(this.app, path);
-  }
-
-  getAuth(): M365Auth {
-    return this.auth;
   }
 
   private getAllAttendees(): GraphAttendee[] {

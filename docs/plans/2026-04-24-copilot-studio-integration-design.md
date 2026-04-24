@@ -1,39 +1,38 @@
-# Copilot Studio Agent Integration Design
+# Power Automate Calendar Integration Design
 
 ## Problem
 
-The Alembic plugin needs to pull calendar events (subject, attendees, times) from the user's M365 tenant to auto-populate meeting context and create people notes. Direct API access via OAuth (PKCE, Azure CLI, or any first-party client ID) is blocked by the corporate tenant's AADSTS65002 preauthorization policy. No app registration with a client secret is available.
+The Alembic plugin needs to pull calendar events (subject, attendees, times) from the user's M365 tenant to auto-populate meeting context and create people notes. Direct API access via OAuth is blocked by AADSTS65002 preauthorization policy. No app registration is available. Direct Line channel is admin-disabled. Copilot Studio Agents SDK requires an app registration with `CopilotStudio.Copilots.Invoke` permission.
 
 ## Approach
 
-Use a **Copilot Studio agent** that already has M365 tenant access as a proxy. The plugin communicates with the agent via the **Direct Line REST API** — simple HTTP calls authenticated with a secret key. No OAuth, no tokens, no app registration.
+Use a **Power Automate cloud flow** with an HTTP Request trigger. The flow uses the **Office 365 Outlook connector** (pre-authorized in the tenant) to fetch calendar events and returns them as JSON. The plugin makes one HTTP POST per refresh cycle. No OAuth, no app registration, no Direct Line.
 
 ## Architecture
 
 ```
-Plugin (Obsidian)                     Microsoft Cloud
-─────────────────                     ───────────────
-                   Direct Line API
-CopilotAgent ─────────────────────► Copilot Studio Agent
-  (new class)    POST /activities       │
-       │         GET  /activities       │ Power Automate /
-       │              ◄────────────────  M365 Connector
-       ▼                                │
-CalendarSync                         Calendar Data
-  (existing)                         (today's events)
+Plugin (Obsidian)                     Power Platform
+─────────────────                     ──────────────
+                    HTTP POST
+CalendarAgent ──────────────────────► Power Automate Flow
+  (new class)       (one call)          │
+       │                                │ Office 365 Outlook
+       │          HTTP 200 + JSON       │ connector (V4)
+       │  ◄─────────────────────────   Calendar Events
+       ▼
+CalendarSync (existing)
        │
        ▼
-PeopleManager
-  (existing)
+PeopleManager (existing)
 ```
 
 ### What changes
 
 - **`m365-auth.ts`** — deleted (no more PKCE, tokens, localhost server)
-- **`graph-client.ts`** — replaced with **`copilot-agent.ts`** (Direct Line REST client)
-- **`calendar-sync.ts`** — swap `GraphClient` dependency for `CopilotAgent`
-- **Settings** — replace OAuth Connect/Disconnect with a "Direct Line Secret" text field
-- **Types** — remove `m365RefreshToken/AccessToken/TokenExpiry`, add `directLineSecret` and `agentPrompt`
+- **`graph-client.ts`** — replaced with **`calendar-agent.ts`** (single HTTP POST client)
+- **`calendar-sync.ts`** — swap `GraphClient` dependency for `CalendarAgent`
+- **Settings** — replace OAuth Connect/Disconnect with a "Flow URL" text field
+- **Types** — remove `m365RefreshToken/AccessToken/TokenExpiry`, add `calendarFlowUrl`
 
 ### What stays the same
 
@@ -42,49 +41,27 @@ PeopleManager
 - `meeting-view.ts` event list UI
 - `CalendarEvent` and `GraphAttendee` interfaces
 
-## CopilotAgent — Direct Line Client
+## CalendarAgent — HTTP Client
 
-`src/copilot-agent.ts` replaces both `m365-auth.ts` and `graph-client.ts`. Stateless HTTP client — no tokens to refresh, no OAuth flows.
+`src/calendar-agent.ts` replaces both `m365-auth.ts` and `graph-client.ts`. Stateless single-request HTTP client.
 
 ### Request lifecycle
 
-1. Generate a Direct Line token from the secret (POST `/tokens/generate`)
-2. Start a conversation (POST `/conversations`)
-3. Send a message requesting today's calendar as JSON
-4. Poll for response (GET `/conversations/{id}/activities?watermark=...`)
-5. Parse the agent's reply — extract JSON from the response text
-6. Normalize to `CalendarEvent[]` and return
+1. POST to the flow URL with `{ startDateTime, endDateTime }` in the body
+2. Receive JSON response containing calendar events
+3. Normalize response to `CalendarEvent[]` and return
 
-### Conversation management
+### Response format
 
-- One active conversation at a time, cached with its token expiry
-- Token lasts 30 minutes; new conversation created on expiry
-- New conversation started after 15 messages (Direct Line limit is 20)
-- Abandoned conversations auto-clean after 10 minutes
-
-### Response parsing
-
-The agent may return natural language with embedded JSON, or structured JSON directly. Parsing strategy:
-
-1. Try `JSON.parse` on full response text
-2. If that fails, extract the first `[...]` or `{...}` block via regex
-3. If that also fails, return empty array and log warning
-
-### Timeouts
-
-- 30-second timeout on polling for agent response
-- Stale data preserved on timeout (no crash, next poll retries)
+The Office 365 Outlook connector returns events in Graph/Outlook format (PascalCase). The flow returns them directly. The normalizer handles both PascalCase and camelCase field names for resilience.
 
 ## Settings
 
 ```
 Microsoft 365 Integration
 ─────────────────────────
-Direct Line Secret: [•••••••••••••••••••]
-  ↳ Paste from Copilot Studio → Settings → Channels → Direct Line
-
-Prompt (optional): [List my calendar events for today...]
-  ↳ Customize if your agent expects a specific command
+Calendar Flow URL: [•••••••••••••••••••]
+  ↳ Paste your Power Automate HTTP trigger URL
 
 People folder: [People]
 Calendar poll interval: [5] minutes
@@ -99,23 +76,31 @@ m365AccessToken?: string;
 m365TokenExpiry?: number;
 
 // Added
-directLineSecret?: string;
-agentPrompt?: string;
+calendarFlowUrl?: string;
 ```
 
 ## Error Handling
 
 | Scenario | Behavior |
 |----------|----------|
-| 403 (invalid secret) | Log error, show in meeting view, `isConnected()` → false |
+| Invalid/expired flow URL | Log error, `isConnected()` → false |
 | Network timeout (30s) | Skip poll cycle, keep stale events, log warning |
-| Agent unresponsive | Same as timeout |
-| Unparseable response | Log raw response at debug level, return empty array |
-| Conversation expired | Auto-create new conversation on next poll |
-| Rate limit approached | Start new conversation after 15 messages |
+| Non-200 response | Log status + body, throw to caller |
+| Empty/malformed JSON | Return empty array, log warning |
 
 ## Privacy
 
-- No audio, transcript, or meeting content sent to the agent
-- Only calendar metadata requested (subject, times, attendees, location)
-- Direct Line secret stored in Obsidian's `data.json` (local file)
+- No audio, transcript, or meeting content sent to the flow
+- Only date range sent in request body
+- Flow URL stored in Obsidian's `data.json` (local file)
+
+## Power Automate Flow Setup (User Instructions)
+
+1. Go to make.powerautomate.com → Create → Instant cloud flow
+2. Add trigger: "When an HTTP request is received"
+   - Request body schema: `{ "startDateTime": "string", "endDateTime": "string" }`
+3. Add action: "Get calendar view of events (V4)" from Office 365 Outlook
+   - Start time: `triggerBody()['startDateTime']`
+   - End time: `triggerBody()['endDateTime']`
+4. Add action: "Response" — Status 200, Body: `body('Get_calendar_view_of_events_(V4)')`
+5. Save → Copy the HTTP POST URL → Paste into Alembic settings

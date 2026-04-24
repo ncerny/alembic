@@ -4,9 +4,7 @@ export interface MeetingNotesSettings {
   vocabularyHints: string[];
   peopleFolderPath: string;
   calendarPollingMinutes: number;
-  m365RefreshToken?: string;
-  m365AccessToken?: string;
-  m365TokenExpiry?: number;
+  calendarFlowUrl?: string;
 }
 
 export const DEFAULT_SETTINGS: MeetingNotesSettings = {
@@ -96,10 +94,6 @@ export interface CalendarEvent {
   location?: {
     displayName: string;
   };
-}
-
-export interface CalendarViewResponse {
-  value: CalendarEvent[];
 }
 
 export const MEETING_VIEW_TYPE = "alembic-view";
