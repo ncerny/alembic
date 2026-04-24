@@ -85,7 +85,7 @@ export class M365Auth {
    * Get the login command for the user to run.
    */
   getLoginCommand(): string {
-    return "az login --allow-no-subscriptions --scope https://graph.microsoft.com/.default";
+    return "az login --allow-no-subscriptions";
   }
 
   getAzPath(): string | null {
