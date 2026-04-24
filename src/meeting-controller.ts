@@ -8,8 +8,9 @@ import { Transcriber } from "./transcriber";
 import { Summarizer } from "./summarizer";
 import { CopilotSDKProvider } from "./providers/copilot-sdk";
 import { NoteBuilder } from "./note-builder";
-import { getVaultVocabulary, vocabToRecognitionHints } from "./vault-vocab";
+import { getVaultVocabulary, vocabToRecognitionHints, correctTranscriptNames } from "./vault-vocab";
 import type {
+  CalendarEvent,
   DependencyIssue,
   MeetingData,
   MeetingState,
@@ -127,6 +128,7 @@ export class MeetingController {
   async stopAndProcess(
     meetingTitle: string,
     userNotes: string,
+    calendarEvent?: CalendarEvent,
   ): Promise<void> {
     if (!this.audioCapture.isRecording) {
       new Notice("No active recording");
@@ -151,6 +153,37 @@ export class MeetingController {
         [...this.plugin.settings.vocabularyHints, "Alembic"],
       );
 
+      // Augment with calendar data if available
+      let augmentedTitle = meetingTitle;
+      let augmentedNotes = userNotes;
+
+      if (calendarEvent) {
+        augmentedTitle = augmentedTitle || calendarEvent.subject;
+
+        // Add attendee names as extra vocabulary hints
+        const attendeeNames = calendarEvent.attendees
+          .map((a) => a.emailAddress.name)
+          .filter(Boolean);
+        for (const name of attendeeNames) {
+          for (const word of name.split(/\s+/)) {
+            if (word.length >= 2) recognitionHints.push(word);
+          }
+        }
+
+        // Append agenda as context if available
+        if (calendarEvent.body?.content) {
+          const bodyText = calendarEvent.body.content
+            .replace(/<[^>]*>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (bodyText && bodyText.length > 10) {
+            augmentedNotes = augmentedNotes
+              ? `${augmentedNotes}\n\n--- Meeting Agenda ---\n${bodyText}`
+              : bodyText;
+          }
+        }
+      }
+
       this.lastTranscript = await this.transcriber.transcribeFile(
         wavPath,
         (msg) => this.emitProgress(msg),
@@ -163,6 +196,12 @@ export class MeetingController {
         return;
       }
 
+      // Correct misheard names in transcript using vault vocabulary
+      this.lastTranscript = this.lastTranscript.map((seg) => ({
+        ...seg,
+        text: correctTranscriptNames(seg.text, vaultVocab),
+      }));
+
       // Summarize
       this.setState("summarizing");
       this.emitProgress("Generating summary...");
@@ -173,14 +212,14 @@ export class MeetingController {
 
       const provider = new CopilotSDKProvider(this.getPluginDir());
       const summarizer = new Summarizer(provider);
-      this.lastSummary = await summarizer.summarize(transcriptText, userNotes);
+      this.lastSummary = await summarizer.summarize(transcriptText, augmentedNotes, vaultVocab);
 
       // Build note
       this.emitProgress("Creating meeting note...");
       const today = new Date().toISOString().split("T")[0];
       const meetingData: MeetingData = {
-        title: meetingTitle || "Meeting",
-        userNotes,
+        title: augmentedTitle || "Meeting",
+        userNotes: augmentedNotes,
         transcript: this.lastTranscript,
         summary: this.lastSummary,
         recordingDuration,
@@ -215,23 +254,30 @@ export class MeetingController {
       this.setState("summarizing");
       this.emitProgress("Generating summary...");
 
-      const transcriptText = transcript.map((s) => s.text).join("\n");
+      const vaultVocab = getVaultVocabulary(this.plugin.app);
+
+      // Correct misheard names in transcript
+      const correctedTranscript = transcript.map((seg) => ({
+        ...seg,
+        text: correctTranscriptNames(seg.text, vaultVocab),
+      }));
+
+      const transcriptText = correctedTranscript.map((s) => s.text).join("\n");
       const provider = new CopilotSDKProvider(this.getPluginDir());
       const summarizer = new Summarizer(provider);
-      const summary = await summarizer.summarize(transcriptText, userNotes);
+      const summary = await summarizer.summarize(transcriptText, userNotes, vaultVocab);
 
       this.emitProgress("Creating meeting note...");
       const today = new Date().toISOString().split("T")[0];
       const meetingData: MeetingData = {
         title: meetingTitle || "Meeting",
         userNotes,
-        transcript,
+        transcript: correctedTranscript,
         summary,
         recordingDuration: 0,
         date: today,
       };
 
-      const vaultVocab = getVaultVocabulary(this.plugin.app);
       const noteBuilder = new NoteBuilder(
         this.plugin.app,
         this.plugin.settings.outputFolder,

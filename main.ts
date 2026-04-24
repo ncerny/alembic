@@ -2,6 +2,8 @@ import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { MeetingNotesSettingTab } from "./src/settings";
 import { MeetingView } from "./src/meeting-view";
 import { MeetingController } from "./src/meeting-controller";
+import { M365Auth } from "./src/m365-auth";
+import { CalendarSync } from "./src/calendar-sync";
 import {
   DEFAULT_SETTINGS,
   MEETING_VIEW_TYPE,
@@ -11,11 +13,35 @@ import {
 export default class MeetingNotesPlugin extends Plugin {
   settings: MeetingNotesSettings = DEFAULT_SETTINGS;
   controller!: MeetingController;
+  calendarSync: CalendarSync | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
 
     this.controller = new MeetingController(this);
+
+    // Initialize M365 calendar sync
+    const m365Auth = new M365Auth();
+    if (m365Auth.isAvailable()) {
+      this.calendarSync = new CalendarSync(
+        m365Auth,
+        this.app,
+        this.settings.peopleFolderPath,
+      );
+
+      // Initial calendar fetch (non-blocking)
+      this.calendarSync.refresh().catch((err) => {
+        console.log("[alembic] Calendar sync not available:", err.message);
+      });
+
+      // Poll for calendar updates using registerInterval (auto-cleanup on unload)
+      const intervalMs = this.settings.calendarPollingMinutes * 60 * 1000;
+      this.registerInterval(window.setInterval(() => {
+        this.calendarSync?.refresh().catch((err) => {
+          console.warn("[alembic] Calendar refresh failed:", err.message);
+        });
+      }, intervalMs));
+    }
 
     // Register the meeting view
     this.registerView(
@@ -50,6 +76,24 @@ export default class MeetingNotesPlugin extends Plugin {
         if (view) {
           // Trigger stop from the view
           this.controller.stopAndProcess("Meeting", "");
+        }
+      },
+    });
+
+    this.addCommand({
+      id: "refresh-calendar",
+      name: "Refresh calendar events",
+      callback: async () => {
+        if (!this.calendarSync) {
+          new Notice("M365 integration not available — Azure CLI not found");
+          return;
+        }
+        try {
+          const events = await this.calendarSync.refresh();
+          new Notice(`📅 Found ${events.length} events today`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          new Notice(`Calendar refresh failed: ${msg}`, 8000);
         }
       },
     });
