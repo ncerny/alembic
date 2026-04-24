@@ -8,18 +8,27 @@ export class CalendarSync {
   private auth: M365Auth;
   private graphClient: GraphClient;
   private peopleManager: PeopleManager;
+  private app: App;
   private events: CalendarEvent[] = [];
   private lastFetch: number = 0;
   private listeners: ((events: CalendarEvent[]) => void)[] = [];
+  private _connected = false;
 
   constructor(auth: M365Auth, app: App, peopleFolderPath: string) {
     this.auth = auth;
+    this.app = app;
     this.graphClient = new GraphClient(auth);
     this.peopleManager = new PeopleManager(app, peopleFolderPath);
   }
 
-  onEventsUpdate(listener: (events: CalendarEvent[]) => void): void {
+  /**
+   * Subscribe to calendar event updates. Returns an unsubscribe function.
+   */
+  onEventsUpdate(listener: (events: CalendarEvent[]) => void): () => void {
     this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== listener);
+    };
   }
 
   private emitEvents(): void {
@@ -34,6 +43,7 @@ export class CalendarSync {
     try {
       this.events = await this.graphClient.getCalendarView();
       this.lastFetch = Date.now();
+      this._connected = true;
 
       // Auto-create people notes for all attendees
       const allAttendees = this.getAllAttendees();
@@ -44,6 +54,7 @@ export class CalendarSync {
       this.emitEvents();
       return this.events;
     } catch (err) {
+      this._connected = false;
       console.error("[alembic] Calendar refresh failed:", err);
       throw err;
     }
@@ -95,22 +106,23 @@ export class CalendarSync {
    */
   getEventBodyText(event: CalendarEvent): string {
     if (!event.body?.content) return "";
-    return event.body.content
-      .replace(/<[^>]*>/g, " ")
-      .replace(/&nbsp;/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/\s+/g, " ")
-      .trim();
+    return stripHtml(event.body.content);
   }
 
   getEvents(): CalendarEvent[] {
     return this.events;
   }
 
+  /**
+   * Returns cached connection status (updated during refresh).
+   * Never blocks the main thread.
+   */
   isConnected(): boolean {
-    return this.auth.isAvailable() && this.auth.getAccessToken() !== null;
+    return this._connected;
+  }
+
+  updatePeopleFolderPath(path: string): void {
+    this.peopleManager = new PeopleManager(this.app, path);
   }
 
   isAzAvailable(): boolean {
@@ -137,4 +149,18 @@ export class CalendarSync {
 
     return attendees;
   }
+}
+
+/**
+ * Strip HTML tags and decode common entities from calendar body content.
+ */
+export function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ")
+    .trim();
 }

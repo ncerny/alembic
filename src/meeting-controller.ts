@@ -9,6 +9,7 @@ import { Summarizer } from "./summarizer";
 import { CopilotSDKProvider } from "./providers/copilot-sdk";
 import { NoteBuilder } from "./note-builder";
 import { getVaultVocabulary, vocabToRecognitionHints, correctTranscriptNames } from "./vault-vocab";
+import { stripHtml } from "./calendar-sync";
 import type {
   CalendarEvent,
   DependencyIssue,
@@ -172,11 +173,8 @@ export class MeetingController {
 
         // Append agenda as context if available
         if (calendarEvent.body?.content) {
-          const bodyText = calendarEvent.body.content
-            .replace(/<[^>]*>/g, " ")
-            .replace(/\s+/g, " ")
-            .trim();
-          if (bodyText && bodyText.length > 10) {
+          const bodyText = stripHtml(calendarEvent.body.content);
+          if (bodyText.length > 10) {
             augmentedNotes = augmentedNotes
               ? `${augmentedNotes}\n\n--- Meeting Agenda ---\n${bodyText}`
               : bodyText;

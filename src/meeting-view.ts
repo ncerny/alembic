@@ -19,6 +19,7 @@ export class MeetingView extends ItemView {
   private warningsEl: HTMLElement | null = null;
   private calendarSection: HTMLElement | null = null;
   private selectedEvent: CalendarEvent | null = null;
+  private unsubCalendar?: () => void;
 
   constructor(leaf: WorkspaceLeaf, plugin: MeetingNotesPlugin) {
     super(leaf);
@@ -54,9 +55,9 @@ export class MeetingView extends ItemView {
     this.renderCalendarSection();
 
     // Listen for calendar updates
-    const calendarSync = (this.plugin as any).calendarSync;
+    const calendarSync = this.plugin.calendarSync;
     if (calendarSync) {
-      calendarSync.onEventsUpdate(() => this.renderCalendarSection());
+      this.unsubCalendar = calendarSync.onEventsUpdate(() => this.renderCalendarSection());
     }
 
     // Meeting title
@@ -264,11 +265,25 @@ export class MeetingView extends ItemView {
     return this.selectedEvent;
   }
 
+  getTitle(): string {
+    return this.titleInput?.value || "";
+  }
+
+  getNotes(): string {
+    return this.notesArea?.value || "";
+  }
+
+  private isEventSelected(event: CalendarEvent): boolean {
+    if (!this.selectedEvent) return false;
+    return this.selectedEvent.subject === event.subject &&
+      this.selectedEvent.start.dateTime === event.start.dateTime;
+  }
+
   private renderCalendarSection(): void {
     if (!this.calendarSection) return;
     this.calendarSection.empty();
 
-    const calendarSync = (this.plugin as any).calendarSync;
+    const calendarSync = this.plugin.calendarSync;
     if (!calendarSync || !calendarSync.isAzAvailable()) return;
 
     if (!calendarSync.isConnected()) {
@@ -277,7 +292,7 @@ export class MeetingView extends ItemView {
       return;
     }
 
-    const events = calendarSync.getEvents() as CalendarEvent[];
+    const events = calendarSync.getEvents();
     if (events.length === 0) {
       const hint = this.calendarSection.createDiv({ cls: "calendar-hint" });
       hint.setText("📅 No meetings today");
@@ -295,7 +310,7 @@ export class MeetingView extends ItemView {
       const isTeams = !!event.onlineMeeting?.joinUrl;
 
       const row = this.calendarSection.createDiv({
-        cls: `calendar-event${this.selectedEvent === event ? " selected" : ""}`,
+        cls: `calendar-event${this.isEventSelected(event) ? " selected" : ""}`,
       });
 
       row.createSpan({ cls: "event-time", text: timeStr });
@@ -316,7 +331,7 @@ export class MeetingView extends ItemView {
   }
 
   async onClose(): Promise<void> {
-    // cleanup handled by plugin
+    this.unsubCalendar?.();
   }
 }
 

@@ -4,6 +4,7 @@ export interface LLMProvider {
   summarize(
     transcript: string,
     userNotes: string,
+    knownNames?: string[],
   ): Promise<MeetingSummary>;
 }
 
@@ -17,7 +18,8 @@ export class Summarizer {
   async summarize(
     transcript: string,
     userNotes: string,
+    knownNames?: string[],
   ): Promise<MeetingSummary> {
-    return this.provider.summarize(transcript, userNotes);
+    return this.provider.summarize(transcript, userNotes, knownNames);
   }
 }

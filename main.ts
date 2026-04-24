@@ -71,11 +71,12 @@ export default class MeetingNotesPlugin extends Plugin {
       id: "stop-recording",
       name: "Stop recording and generate notes",
       callback: () => {
-        // Will use whatever is in the meeting view
         const view = this.getMeetingView();
         if (view) {
-          // Trigger stop from the view
-          this.controller.stopAndProcess("Meeting", "");
+          const title = view.getTitle() || "Meeting";
+          const notes = view.getNotes();
+          const event = view.getSelectedEvent();
+          this.controller.stopAndProcess(title, notes, event ?? undefined);
         }
       },
     });

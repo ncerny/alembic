@@ -12,6 +12,7 @@ export class CopilotSDKProvider implements LLMProvider {
   async summarize(
     transcript: string,
     userNotes: string,
+    knownNames?: string[],
   ): Promise<MeetingSummary> {
     const path = require("path");
     const fs = require("fs");
@@ -58,7 +59,7 @@ export class CopilotSDKProvider implements LLMProvider {
       await client.start();
 
       // Auto-select cheapest model with enough context for this transcript
-      const userPrompt = buildUserPrompt(transcript, userNotes);
+      const userPrompt = buildUserPrompt(transcript, userNotes, knownNames);
       const fullPrompt = `${SYSTEM_PROMPT}\n\n${userPrompt}`;
       // ~4 chars per token, plus headroom for the response
       const estimatedInputTokens = Math.ceil(fullPrompt.length / 4);

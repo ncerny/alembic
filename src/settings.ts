@@ -1,7 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type MeetingNotesPlugin from "../main";
 import type { MeetingNotesSettings } from "./types";
-import type { CalendarSync } from "./calendar-sync";
 
 export class MeetingNotesSettingTab extends PluginSettingTab {
   plugin: MeetingNotesPlugin;
@@ -69,7 +68,7 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "Microsoft 365 Integration" });
 
     const m365Status = containerEl.createDiv({ cls: "setting-item-description" });
-    const calendarSync = (this.plugin as any).calendarSync as CalendarSync | null;
+    const calendarSync = this.plugin.calendarSync;
     if (!calendarSync?.isAzAvailable()) {
       m365Status.innerHTML = `<p>⛔ Azure CLI not found. Install: <code>brew install azure-cli</code></p>`;
     } else if (!calendarSync?.isConnected()) {
@@ -91,13 +90,14 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
         text.onChange(async (value) => {
           this.plugin.settings.peopleFolderPath = value || "People";
           await this.plugin.saveSettings();
+          this.plugin.calendarSync?.updatePeopleFolderPath(value || "People");
         });
       });
 
     // Calendar polling interval
     new Setting(containerEl)
       .setName("Calendar polling interval")
-      .setDesc("How often to refresh calendar events (in minutes)")
+      .setDesc("How often to refresh calendar events (in minutes). Changes take effect after restarting Obsidian.")
       .addText((text) => {
         text.setPlaceholder("5");
         text.setValue(String(this.plugin.settings.calendarPollingMinutes));
