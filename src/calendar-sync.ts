@@ -129,6 +129,10 @@ export class CalendarSync {
     return this.auth.isAvailable();
   }
 
+  getAuth(): M365Auth {
+    return this.auth;
+  }
+
   getLoginCommand(): string {
     return this.auth.getLoginCommand();
   }

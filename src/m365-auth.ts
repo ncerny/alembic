@@ -1,4 +1,4 @@
-import { execFileSync } from "child_process";
+import { execFile, execFileSync } from "child_process";
 import { existsSync } from "fs";
 
 const AZ_PATHS = [
@@ -35,10 +35,7 @@ export class M365Auth {
     if (!this.azPath) return null;
 
     try {
-      const env: Record<string, string> = { ...process.env } as Record<string, string>;
-      if (this.caCertPath) {
-        env.REQUESTS_CA_BUNDLE = this.caCertPath;
-      }
+      const env = this.getEnv();
 
       const token = execFileSync(this.azPath, [
         "account", "get-access-token",
@@ -65,10 +62,7 @@ export class M365Auth {
     if (!this.azPath) return false;
 
     try {
-      const env: Record<string, string> = { ...process.env } as Record<string, string>;
-      if (this.caCertPath) {
-        env.REQUESTS_CA_BUNDLE = this.caCertPath;
-      }
+      const env = this.getEnv();
 
       execFileSync(this.azPath, ["account", "show"], {
         encoding: "utf-8",
@@ -82,7 +76,51 @@ export class M365Auth {
   }
 
   /**
-   * Get the login command for the user to run.
+   * Get the tenant ID from the current az session (if any).
+   */
+  getTenantId(): string | null {
+    if (!this.azPath) return null;
+
+    try {
+      const env = this.getEnv();
+      return execFileSync(this.azPath, [
+        "account", "show", "--query", "tenantId", "-o", "tsv",
+      ], { encoding: "utf-8", timeout: 5000, env }).trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Spawn az login as a child process. Opens browser for auth.
+   * Returns a promise that resolves on success, rejects on failure.
+   */
+  login(tenantId?: string): Promise<void> {
+    if (!this.azPath) return Promise.reject(new Error("Azure CLI not found"));
+
+    return new Promise((resolve, reject) => {
+      const args = ["login", "--allow-no-subscriptions", "--output", "none"];
+      if (tenantId) {
+        args.push("--tenant", tenantId);
+      }
+
+      const env = this.getEnv();
+      const proc = execFile(this.azPath!, args, { env, timeout: 120000 }, (err) => {
+        if (err) {
+          reject(new Error(`az login failed: ${err.message}`));
+        } else {
+          resolve();
+        }
+      });
+
+      proc.stderr?.on("data", (data: string) => {
+        console.log("[alembic] az login:", data.toString().trim());
+      });
+    });
+  }
+
+  /**
+   * Get the login command for the user to run manually.
    */
   getLoginCommand(): string {
     return "az login --allow-no-subscriptions";
@@ -90,5 +128,13 @@ export class M365Auth {
 
   getAzPath(): string | null {
     return this.azPath;
+  }
+
+  private getEnv(): Record<string, string> {
+    const env: Record<string, string> = { ...process.env } as Record<string, string>;
+    if (this.caCertPath) {
+      env.REQUESTS_CA_BUNDLE = this.caCertPath;
+    }
+    return env;
   }
 }

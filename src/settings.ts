@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type MeetingNotesPlugin from "../main";
 import type { MeetingNotesSettings } from "./types";
 
@@ -72,10 +72,28 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
     if (!calendarSync?.isAzAvailable()) {
       m365Status.innerHTML = `<p>⛔ Azure CLI not found. Install: <code>brew install azure-cli</code></p>`;
     } else if (!calendarSync?.isConnected()) {
-      m365Status.innerHTML = `
-        <p>⚠️ Not connected to Microsoft 365.</p>
-        <p>Run in terminal: <code>${calendarSync.getLoginCommand()}</code></p>
-      `;
+      const m365Auth = calendarSync.getAuth();
+      new Setting(containerEl)
+        .setName("Microsoft 365 connection")
+        .setDesc("Sign in to pull calendar events and meeting attendees")
+        .addButton((btn) => {
+          btn.setButtonText("Connect to M365")
+            .setCta()
+            .onClick(async () => {
+              btn.setButtonText("Signing in…").setDisabled(true);
+              try {
+                const tenantId = m365Auth.getTenantId();
+                await m365Auth.login(tenantId ?? undefined);
+                await calendarSync.refresh();
+                new Notice("✅ Connected to Microsoft 365");
+                this.display();
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                new Notice(`M365 login failed: ${msg}`, 8000);
+                btn.setButtonText("Connect to M365").setDisabled(false);
+              }
+            });
+        });
     } else {
       m365Status.innerHTML = `<p>✅ Connected to Microsoft 365</p>`;
     }
