@@ -121,20 +121,19 @@ export class CalendarSync {
     return this._connected;
   }
 
+  /**
+   * Whether the user has logged in (has a refresh token).
+   */
+  isConfigured(): boolean {
+    return this.auth.hasRefreshToken();
+  }
+
   updatePeopleFolderPath(path: string): void {
     this.peopleManager = new PeopleManager(this.app, path);
   }
 
-  isAzAvailable(): boolean {
-    return this.auth.isAvailable();
-  }
-
   getAuth(): M365Auth {
     return this.auth;
-  }
-
-  getLoginCommand(): string {
-    return this.auth.getLoginCommand();
   }
 
   private getAllAttendees(): GraphAttendee[] {

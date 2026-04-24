@@ -19,11 +19,11 @@ export class GraphClient {
     startDate?: Date,
     endDate?: Date,
   ): Promise<CalendarEvent[]> {
-    const token = this.auth.getAccessToken();
+    const token = await this.auth.getAccessToken();
     if (!token) {
       throw new Error(
         "Not authenticated to Microsoft 365. " +
-        `Run: ${this.auth.getLoginCommand()}`,
+        "Use the Connect button in Alembic settings.",
       );
     }
 
@@ -39,21 +39,36 @@ export class GraphClient {
 
     const url = `${GRAPH_BASE}/me/calendarView?${params.toString()}`;
 
-    const response = await requestUrl({
-      url,
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
+    try {
+      const response = await requestUrl({
+        url,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      });
 
-    if (response.status !== 200) {
-      throw new Error(`Graph API error: ${response.status} ${response.text}`);
+      const data = response.json as CalendarViewResponse;
+      return data.value || [];
+    } catch (err: any) {
+      // Obsidian's requestUrl throws on non-200 — extract details
+      const status = err?.status || "unknown";
+      let detail = "";
+      try {
+        const body = typeof err?.response === "string" ? JSON.parse(err.response) : err?.json;
+        detail = body?.error?.message || body?.error?.code || JSON.stringify(body?.error);
+      } catch {
+        detail = err?.message || String(err);
+      }
+
+      // Log details for diagnostics on 403
+      if (status === 403 || String(detail).includes("403")) {
+        console.error("[alembic] Graph API 403 — check token scopes");
+      }
+
+      throw new Error(`Graph API ${status}: ${detail}`);
     }
-
-    const data = response.json as CalendarViewResponse;
-    return data.value || [];
   }
 }
 

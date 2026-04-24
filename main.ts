@@ -2,7 +2,7 @@ import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { MeetingNotesSettingTab } from "./src/settings";
 import { MeetingView } from "./src/meeting-view";
 import { MeetingController } from "./src/meeting-controller";
-import { M365Auth } from "./src/m365-auth";
+import { M365Auth, type TokenData } from "./src/m365-auth";
 import { CalendarSync } from "./src/calendar-sync";
 import {
   DEFAULT_SETTINGS,
@@ -13,35 +13,58 @@ import {
 export default class MeetingNotesPlugin extends Plugin {
   settings: MeetingNotesSettings = DEFAULT_SETTINGS;
   controller!: MeetingController;
-  calendarSync: CalendarSync | null = null;
+  calendarSync!: CalendarSync;
+  private m365Auth!: M365Auth;
 
   async onload(): Promise<void> {
     await this.loadSettings();
 
     this.controller = new MeetingController(this);
 
-    // Initialize M365 calendar sync
-    const m365Auth = new M365Auth();
-    if (m365Auth.isAvailable()) {
-      this.calendarSync = new CalendarSync(
-        m365Auth,
-        this.app,
-        this.settings.peopleFolderPath,
-      );
+    // Initialize M365 auth with saved tokens
+    const savedTokenData: TokenData | null = this.settings.m365RefreshToken
+      ? {
+          accessToken: this.settings.m365AccessToken || "",
+          refreshToken: this.settings.m365RefreshToken,
+          expiresAt: this.settings.m365TokenExpiry || 0,
+        }
+      : null;
 
-      // Initial calendar fetch (non-blocking)
+    this.m365Auth = new M365Auth(savedTokenData, async (tokenData) => {
+      if (tokenData) {
+        this.settings.m365AccessToken = tokenData.accessToken;
+        this.settings.m365RefreshToken = tokenData.refreshToken;
+        this.settings.m365TokenExpiry = tokenData.expiresAt;
+      } else {
+        delete this.settings.m365AccessToken;
+        delete this.settings.m365RefreshToken;
+        delete this.settings.m365TokenExpiry;
+      }
+      await this.saveSettings();
+    });
+
+    this.calendarSync = new CalendarSync(
+      this.m365Auth,
+      this.app,
+      this.settings.peopleFolderPath,
+    );
+
+    // Initial calendar fetch if we have a token (non-blocking)
+    if (this.m365Auth.hasRefreshToken()) {
       this.calendarSync.refresh().catch((err) => {
         console.log("[alembic] Calendar sync not available:", err.message);
       });
+    }
 
-      // Poll for calendar updates using registerInterval (auto-cleanup on unload)
-      const intervalMs = this.settings.calendarPollingMinutes * 60 * 1000;
-      this.registerInterval(window.setInterval(() => {
-        this.calendarSync?.refresh().catch((err) => {
+    // Poll for calendar updates
+    const intervalMs = this.settings.calendarPollingMinutes * 60 * 1000;
+    this.registerInterval(window.setInterval(() => {
+      if (this.m365Auth.hasRefreshToken()) {
+        this.calendarSync.refresh().catch((err) => {
           console.warn("[alembic] Calendar refresh failed:", err.message);
         });
-      }, intervalMs));
-    }
+      }
+    }, intervalMs));
 
     // Register the meeting view
     this.registerView(
@@ -85,8 +108,8 @@ export default class MeetingNotesPlugin extends Plugin {
       id: "refresh-calendar",
       name: "Refresh calendar events",
       callback: async () => {
-        if (!this.calendarSync) {
-          new Notice("M365 integration not available — Azure CLI not found");
+        if (!this.m365Auth.hasRefreshToken()) {
+          new Notice("M365 not connected — use Connect button in settings");
           return;
         }
         try {
@@ -115,6 +138,7 @@ export default class MeetingNotesPlugin extends Plugin {
   }
 
   async onunload(): Promise<void> {
+    this.m365Auth.cancelLogin();
     this.app.workspace.detachLeavesOfType(MEETING_VIEW_TYPE);
   }
 

@@ -284,11 +284,11 @@ export class MeetingView extends ItemView {
     this.calendarSection.empty();
 
     const calendarSync = this.plugin.calendarSync;
-    if (!calendarSync || !calendarSync.isAzAvailable()) return;
+    if (!calendarSync.isConfigured()) return;
 
     if (!calendarSync.isConnected()) {
       const hint = this.calendarSection.createDiv({ cls: "calendar-hint" });
-      hint.setText("📅 Connect M365 for auto-populated meetings");
+      hint.setText("📅 Syncing calendar…");
       return;
     }
 

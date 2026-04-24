@@ -67,12 +67,23 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
     // --- Microsoft 365 Integration ---
     containerEl.createEl("h3", { text: "Microsoft 365 Integration" });
 
-    const m365Status = containerEl.createDiv({ cls: "setting-item-description" });
     const calendarSync = this.plugin.calendarSync;
-    if (!calendarSync?.isAzAvailable()) {
-      m365Status.innerHTML = `<p>⛔ Azure CLI not found. Install: <code>brew install azure-cli</code></p>`;
-    } else if (!calendarSync?.isConnected()) {
-      const m365Auth = calendarSync.getAuth();
+    const m365Auth = calendarSync.getAuth();
+
+    if (calendarSync.isConfigured()) {
+      const statusRow = new Setting(containerEl)
+        .setName("Microsoft 365 connection")
+        .setDesc("✅ Connected — calendar events will sync automatically");
+      statusRow.addButton((btn) => {
+        btn.setButtonText("Disconnect")
+          .setWarning()
+          .onClick(() => {
+            m365Auth.logout();
+            new Notice("Disconnected from Microsoft 365");
+            this.display();
+          });
+      });
+    } else {
       new Setting(containerEl)
         .setName("Microsoft 365 connection")
         .setDesc("Sign in to pull calendar events and meeting attendees")
@@ -82,8 +93,7 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
             .onClick(async () => {
               btn.setButtonText("Signing in…").setDisabled(true);
               try {
-                const tenantId = m365Auth.getTenantId();
-                await m365Auth.login(tenantId ?? undefined);
+                await m365Auth.startLogin();
                 await calendarSync.refresh();
                 new Notice("✅ Connected to Microsoft 365");
                 this.display();
@@ -94,8 +104,6 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
               }
             });
         });
-    } else {
-      m365Status.innerHTML = `<p>✅ Connected to Microsoft 365</p>`;
     }
 
     // People folder

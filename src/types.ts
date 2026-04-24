@@ -4,6 +4,9 @@ export interface MeetingNotesSettings {
   vocabularyHints: string[];
   peopleFolderPath: string;
   calendarPollingMinutes: number;
+  m365RefreshToken?: string;
+  m365AccessToken?: string;
+  m365TokenExpiry?: number;
 }
 
 export const DEFAULT_SETTINGS: MeetingNotesSettings = {

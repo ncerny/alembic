@@ -1,140 +1,253 @@
-import { execFile, execFileSync } from "child_process";
-import { existsSync } from "fs";
+import { requestUrl } from "obsidian";
+import { createServer, type Server } from "http";
+import { randomBytes, createHash } from "crypto";
 
-const AZ_PATHS = [
-  "/opt/homebrew/bin/az",
-  "/usr/local/bin/az",
-  "/usr/bin/az",
-];
+const MS_OFFICE_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
+const AUTH_BASE = "https://login.microsoftonline.com/organizations/oauth2/v2.0";
+const SCOPES = "Calendars.Read User.Read offline_access";
+const LOGIN_TIMEOUT_MS = 120_000;
 
-// Corporate proxy CA cert — az CLI needs REQUESTS_CA_BUNDLE
-const CA_CERT_PATHS = [
-  `${process.env.HOME}/.config/opencode/corp-cacerts.pem`,
-  `${process.env.HOME}/certs/cacert.pem`,
-];
+export interface TokenData {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+}
 
 export class M365Auth {
-  private azPath: string | null = null;
-  private caCertPath: string | null = null;
+  private tokenData: TokenData | null;
+  private onTokenUpdate: (data: TokenData | null) => Promise<void>;
+  private loginServer: Server | null = null;
 
-  constructor() {
-    this.azPath = AZ_PATHS.find((p) => existsSync(p)) || null;
-    this.caCertPath = CA_CERT_PATHS.find((p) => existsSync(p)) ||
-      process.env.REQUESTS_CA_BUNDLE || null;
+  constructor(
+    savedTokenData: TokenData | null,
+    onTokenUpdate: (data: TokenData | null) => Promise<void>,
+  ) {
+    this.tokenData = savedTokenData;
+    this.onTokenUpdate = onTokenUpdate;
   }
 
   isAvailable(): boolean {
-    return this.azPath !== null;
+    return true;
+  }
+
+  hasRefreshToken(): boolean {
+    return !!this.tokenData?.refreshToken;
   }
 
   /**
-   * Get a Microsoft Graph access token via Azure CLI.
-   * Returns null if not logged in or az is unavailable.
+   * Get a valid access token, refreshing if needed.
    */
-  getAccessToken(): string | null {
-    if (!this.azPath) return null;
+  async getAccessToken(): Promise<string | null> {
+    if (!this.tokenData) return null;
 
+    // Return cached token if still valid (5-min buffer)
+    if (Date.now() < this.tokenData.expiresAt - 5 * 60 * 1000) {
+      return this.tokenData.accessToken;
+    }
+
+    // Try refresh
     try {
-      const env = this.getEnv();
-
-      const token = execFileSync(this.azPath, [
-        "account", "get-access-token",
-        "--resource-type", "ms-graph",
-        "--query", "accessToken",
-        "-o", "tsv",
-      ], {
-        encoding: "utf-8",
-        timeout: 10000,
-        env,
-      }).trim();
-
-      return token || null;
+      await this.refreshAccessToken();
+      return this.tokenData?.accessToken || null;
     } catch (err) {
-      console.error("[alembic] Failed to get M365 token:", err);
+      console.error("[alembic] Token refresh failed:", err);
+      this.tokenData = null;
+      await this.onTokenUpdate(null);
       return null;
     }
   }
 
   /**
-   * Check if the user is logged in to Azure CLI.
+   * Start PKCE login flow. Opens browser, listens on localhost for callback.
    */
-  isLoggedIn(): boolean {
-    if (!this.azPath) return false;
+  async startLogin(): Promise<void> {
+    const verifier = generateCodeVerifier();
+    const challenge = generateCodeChallenge(verifier);
 
-    try {
-      const env = this.getEnv();
+    return new Promise<void>((resolve, reject) => {
+      let port = 0;
+      let settled = false;
 
-      execFileSync(this.azPath, ["account", "show"], {
-        encoding: "utf-8",
-        timeout: 5000,
-        env,
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  }
+      const server = createServer(async (req, res) => {
+        if (settled) return;
 
-  /**
-   * Get the tenant ID from the current az session (if any).
-   */
-  getTenantId(): string | null {
-    if (!this.azPath) return null;
+        const url = new URL(req.url || "/", `http://localhost:${port}`);
+        const code = url.searchParams.get("code");
+        const error = url.searchParams.get("error");
+        const errorDesc = url.searchParams.get("error_description");
 
-    try {
-      const env = this.getEnv();
-      return execFileSync(this.azPath, [
-        "account", "show", "--query", "tenantId", "-o", "tsv",
-      ], { encoding: "utf-8", timeout: 5000, env }).trim() || null;
-    } catch {
-      return null;
-    }
-  }
+        if (error) {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end(resultPage(false, errorDesc || error));
+          settled = true;
+          cleanup();
+          reject(new Error(errorDesc || error));
+          return;
+        }
 
-  /**
-   * Spawn az login as a child process. Opens browser for auth.
-   * Returns a promise that resolves on success, rejects on failure.
-   */
-  login(tenantId?: string): Promise<void> {
-    if (!this.azPath) return Promise.reject(new Error("Azure CLI not found"));
+        if (!code) {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("Missing authorization code");
+          return;
+        }
 
-    return new Promise((resolve, reject) => {
-      const args = ["login", "--allow-no-subscriptions", "--output", "none"];
-      if (tenantId) {
-        args.push("--tenant", tenantId);
-      }
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(resultPage(true));
 
-      const env = this.getEnv();
-      const proc = execFile(this.azPath!, args, { env, timeout: 120000 }, (err) => {
-        if (err) {
-          reject(new Error(`az login failed: ${err.message}`));
-        } else {
+        try {
+          await this.exchangeCode(code, verifier, port);
+          settled = true;
+          cleanup();
           resolve();
+        } catch (err) {
+          settled = true;
+          cleanup();
+          reject(err);
         }
       });
 
-      proc.stderr?.on("data", (data: string) => {
-        console.log("[alembic] az login:", data.toString().trim());
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        port = typeof addr === "object" && addr ? addr.port : 0;
+        const redirectUri = `http://localhost:${port}`;
+
+        const params = new URLSearchParams({
+          client_id: MS_OFFICE_CLIENT_ID,
+          response_type: "code",
+          redirect_uri: redirectUri,
+          scope: SCOPES,
+          code_challenge: challenge,
+          code_challenge_method: "S256",
+        });
+
+        const authUrl = `${AUTH_BASE}/authorize?${params.toString()}`;
+        window.open(authUrl);
       });
+
+      this.loginServer = server;
+
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error("Login timed out — no response within 2 minutes"));
+        }
+      }, LOGIN_TIMEOUT_MS);
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        try { server.close(); } catch { /* ignore */ }
+        this.loginServer = null;
+      };
     });
   }
 
-  /**
-   * Get the login command for the user to run manually.
-   */
-  getLoginCommand(): string {
-    return "az login --allow-no-subscriptions";
-  }
+  private async exchangeCode(code: string, verifier: string, port: number): Promise<void> {
+    const body = new URLSearchParams({
+      client_id: MS_OFFICE_CLIENT_ID,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: `http://localhost:${port}`,
+      code_verifier: verifier,
+    });
 
-  getAzPath(): string | null {
-    return this.azPath;
-  }
+    const response = await requestUrl({
+      url: `${AUTH_BASE}/token`,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
 
-  private getEnv(): Record<string, string> {
-    const env: Record<string, string> = { ...process.env } as Record<string, string>;
-    if (this.caCertPath) {
-      env.REQUESTS_CA_BUNDLE = this.caCertPath;
+    const data = response.json;
+    if (data.error) {
+      throw new Error(data.error_description || data.error);
     }
-    return env;
+
+    this.tokenData = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresAt: Date.now() + data.expires_in * 1000,
+    };
+
+    await this.onTokenUpdate(this.tokenData);
   }
+
+  private async refreshAccessToken(): Promise<void> {
+    if (!this.tokenData?.refreshToken) throw new Error("No refresh token");
+
+    const body = new URLSearchParams({
+      client_id: MS_OFFICE_CLIENT_ID,
+      grant_type: "refresh_token",
+      refresh_token: this.tokenData.refreshToken,
+      scope: SCOPES,
+    });
+
+    const response = await requestUrl({
+      url: `${AUTH_BASE}/token`,
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+
+    const data = response.json;
+    if (data.error) {
+      throw new Error(data.error_description || data.error);
+    }
+
+    this.tokenData = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || this.tokenData.refreshToken,
+      expiresAt: Date.now() + data.expires_in * 1000,
+    };
+
+    await this.onTokenUpdate(this.tokenData);
+  }
+
+  logout(): void {
+    this.tokenData = null;
+    this.onTokenUpdate(null);
+  }
+
+  cancelLogin(): void {
+    if (this.loginServer) {
+      try { this.loginServer.close(); } catch { /* ignore */ }
+      this.loginServer = null;
+    }
+  }
+
+  getLoginCommand(): string {
+    return "Use the Connect button in Alembic settings";
+  }
+}
+
+function generateCodeVerifier(): string {
+  return base64UrlEncode(randomBytes(32));
+}
+
+function generateCodeChallenge(verifier: string): string {
+  const hash = createHash("sha256").update(verifier).digest();
+  return base64UrlEncode(hash);
+}
+
+function base64UrlEncode(buffer: Buffer): string {
+  return buffer.toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+function resultPage(success: boolean, errorMsg?: string): string {
+  if (success) {
+    return `<!DOCTYPE html><html><head><title>Alembic</title></head>
+<body style="font-family:system-ui;text-align:center;padding:60px">
+<h2>✅ Connected to Microsoft 365</h2>
+<p>You can close this tab and return to Obsidian.</p>
+</body></html>`;
+  }
+  return `<!DOCTYPE html><html><head><title>Alembic</title></head>
+<body style="font-family:system-ui;text-align:center;padding:60px">
+<h2>⛔ Authentication Failed</h2>
+<p>${errorMsg}</p>
+<p>Close this tab and try again in Obsidian settings.</p>
+</body></html>`;
 }
