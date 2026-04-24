@@ -1,8 +1,8 @@
 import { requestUrl } from "obsidian";
 import type { M365Auth } from "./m365-auth";
-import type { CalendarEvent, CalendarViewResponse } from "./types";
+import type { CalendarEvent, GraphAttendee } from "./types";
 
-const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+const OUTLOOK_API = "https://outlook.office365.com/api/v2.0";
 
 export class GraphClient {
   private auth: M365Auth;
@@ -13,7 +13,7 @@ export class GraphClient {
 
   /**
    * Fetch today's calendar events with attendee and online meeting data.
-   * Returns events sorted by start time.
+   * Uses Outlook REST API v2.0 (PascalCase), normalizes to camelCase.
    */
   async getCalendarView(
     startDate?: Date,
@@ -33,11 +33,11 @@ export class GraphClient {
     const params = new URLSearchParams({
       startDateTime: start.toISOString(),
       endDateTime: end.toISOString(),
-      $select: "subject,start,end,attendees,onlineMeeting,body,location,organizer",
-      $orderby: "start/dateTime",
+      $select: "Subject,Start,End,Attendees,Body,Location,Organizer,IsOnlineMeeting,OnlineMeetingUrl",
+      $orderby: "Start/DateTime",
     });
 
-    const url = `${GRAPH_BASE}/me/calendarView?${params.toString()}`;
+    const url = `${OUTLOOK_API}/me/calendarview?${params.toString()}`;
 
     try {
       const response = await requestUrl({
@@ -45,14 +45,14 @@ export class GraphClient {
         method: "GET",
         headers: {
           Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
+          Accept: "application/json",
         },
       });
 
-      const data = response.json as CalendarViewResponse;
-      return data.value || [];
+      const data = response.json;
+      const rawEvents = data.value || [];
+      return rawEvents.map(normalizeEvent);
     } catch (err: any) {
-      // Obsidian's requestUrl throws on non-200 — extract details
       const status = err?.status || "unknown";
       let detail = "";
       try {
@@ -62,14 +62,55 @@ export class GraphClient {
         detail = err?.message || String(err);
       }
 
-      // Log details for diagnostics on 403
-      if (status === 403 || String(detail).includes("403")) {
-        console.error("[alembic] Graph API 403 — check token scopes");
-      }
-
-      throw new Error(`Graph API ${status}: ${detail}`);
+      throw new Error(`Calendar API ${status}: ${detail}`);
     }
   }
+}
+
+/**
+ * Normalize Outlook REST API PascalCase response to our camelCase interfaces.
+ */
+function normalizeEvent(raw: any): CalendarEvent {
+  const attendees: GraphAttendee[] = (raw.Attendees || []).map((a: any) => ({
+    emailAddress: {
+      name: a.EmailAddress?.Name || "",
+      address: a.EmailAddress?.Address || "",
+    },
+    type: (a.Type || "required").toLowerCase() as "required" | "optional" | "resource",
+    status: a.Status ? {
+      response: a.Status.Response || "",
+      time: a.Status.Time,
+    } : undefined,
+  }));
+
+  return {
+    subject: raw.Subject || "",
+    start: {
+      dateTime: raw.Start?.DateTime || "",
+      timeZone: raw.Start?.TimeZone || "UTC",
+    },
+    end: {
+      dateTime: raw.End?.DateTime || "",
+      timeZone: raw.End?.TimeZone || "UTC",
+    },
+    attendees,
+    onlineMeeting: raw.OnlineMeetingUrl
+      ? { joinUrl: raw.OnlineMeetingUrl }
+      : undefined,
+    organizer: raw.Organizer?.EmailAddress ? {
+      emailAddress: {
+        name: raw.Organizer.EmailAddress.Name || "",
+        address: raw.Organizer.EmailAddress.Address || "",
+      },
+    } : undefined,
+    body: raw.Body ? {
+      contentType: raw.Body.ContentType || "",
+      content: raw.Body.Content || "",
+    } : undefined,
+    location: raw.Location?.DisplayName ? {
+      displayName: raw.Location.DisplayName,
+    } : undefined,
+  };
 }
 
 function todayStart(): Date {

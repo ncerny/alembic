@@ -4,7 +4,7 @@ import { randomBytes, createHash } from "crypto";
 
 const MS_OFFICE_CLIENT_ID = "d3590ed6-52b3-4102-aeff-aad2292ab01c";
 const AUTH_BASE = "https://login.microsoftonline.com/organizations/oauth2/v2.0";
-const SCOPES = "Calendars.Read User.Read offline_access";
+const SCOPES = "https://outlook.office365.com/Calendars.Read offline_access";
 const LOGIN_TIMEOUT_MS = 120_000;
 
 export interface TokenData {
