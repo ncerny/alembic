@@ -1,7 +1,14 @@
 import { requestUrl } from "obsidian";
 import type { CalendarEvent, GraphAttendee } from "./types";
+import * as fs from "fs";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+const AZ_PATHS = [
+  "/opt/homebrew/bin/az",
+  "/usr/local/bin/az",
+  "/usr/bin/az",
+];
+const FLOW_RESOURCE = "https://service.flow.microsoft.com";
 
 export class CalendarAgent {
   private flowUrl: string;
@@ -16,6 +23,39 @@ export class CalendarAgent {
 
   isConfigured(): boolean {
     return !!this.flowUrl;
+  }
+
+  /**
+   * Get a Bearer token for Power Automate via Azure CLI.
+   */
+  private async getBearerToken(): Promise<string> {
+    const azBin = AZ_PATHS.find((p) => fs.existsSync(p));
+    if (!azBin) {
+      throw new Error(
+        "Azure CLI (az) not found. Install via: brew install azure-cli",
+      );
+    }
+
+    const { execFile } = require("child_process");
+    return new Promise<string>((resolve, reject) => {
+      execFile(
+        azBin,
+        ["account", "get-access-token", "--resource", FLOW_RESOURCE, "--query", "accessToken", "-o", "tsv"],
+        { encoding: "utf-8", timeout: 15_000 },
+        (err: any, stdout: string, stderr: string) => {
+          if (err) {
+            reject(new Error(`az token failed: ${stderr || err.message}`));
+            return;
+          }
+          const token = stdout.trim();
+          if (!token) {
+            reject(new Error("az returned empty token. Run: az login"));
+            return;
+          }
+          resolve(token);
+        },
+      );
+    });
   }
 
   /**
@@ -34,10 +74,15 @@ export class CalendarAgent {
     const start = startDate || todayStart();
     const end = endDate || todayEnd();
 
+    const token = await this.getBearerToken();
+
     const response = await requestUrl({
       url: this.flowUrl,
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
       body: JSON.stringify({
         startDateTime: start.toISOString(),
         endDateTime: end.toISOString(),
