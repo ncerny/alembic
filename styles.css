@@ -158,3 +158,64 @@
 .meeting-view-container .dep-issue.dep-warning {
   color: var(--text-muted);
 }
+
+/* Calendar section */
+.meeting-view-container .calendar-section {
+  margin-bottom: 4px;
+}
+
+.meeting-view-container .calendar-hint {
+  font-size: 0.8em;
+  color: var(--text-faint);
+  padding: 4px 0;
+}
+
+.meeting-view-container .calendar-label {
+  font-size: 0.8em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.meeting-view-container .calendar-event {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85em;
+  border: 1px solid transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.meeting-view-container .calendar-event:hover {
+  background: var(--background-modifier-hover);
+}
+
+.meeting-view-container .calendar-event.selected {
+  background: var(--background-modifier-hover);
+  border-color: var(--interactive-accent);
+}
+
+.meeting-view-container .event-time {
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
+  white-space: nowrap;
+}
+
+.meeting-view-container .event-title {
+  font-weight: 500;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meeting-view-container .event-meta {
+  color: var(--text-faint);
+  font-size: 0.85em;
+  width: 100%;
+}

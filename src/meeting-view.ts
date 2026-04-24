@@ -1,7 +1,7 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import type MeetingNotesPlugin from "../main";
 import { formatDuration } from "./audio-capture";
-import { MEETING_VIEW_TYPE, type DependencyIssue, type MeetingState } from "./types";
+import { MEETING_VIEW_TYPE, type CalendarEvent, type DependencyIssue, type MeetingState } from "./types";
 
 export class MeetingView extends ItemView {
   private plugin: MeetingNotesPlugin;
@@ -17,6 +17,8 @@ export class MeetingView extends ItemView {
   private stopBtn: HTMLButtonElement | null = null;
   private enhanceBtn: HTMLButtonElement | null = null;
   private warningsEl: HTMLElement | null = null;
+  private calendarSection: HTMLElement | null = null;
+  private selectedEvent: CalendarEvent | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: MeetingNotesPlugin) {
     super(leaf);
@@ -46,6 +48,16 @@ export class MeetingView extends ItemView {
     // Dependency warnings
     this.warningsEl = container.createDiv({ cls: "dependency-warnings" });
     this.renderDependencyWarnings(this.plugin.controller.dependencyIssues);
+
+    // Calendar events section
+    this.calendarSection = container.createDiv({ cls: "calendar-section" });
+    this.renderCalendarSection();
+
+    // Listen for calendar updates
+    const calendarSync = (this.plugin as any).calendarSync;
+    if (calendarSync) {
+      calendarSync.onEventsUpdate(() => this.renderCalendarSection());
+    }
 
     // Meeting title
     this.titleInput = container.createEl("input", {
@@ -128,7 +140,7 @@ export class MeetingView extends ItemView {
   private async onStop(): Promise<void> {
     const title = this.titleInput?.value || "";
     const notes = this.notesArea?.value || "";
-    await this.plugin.controller.stopAndProcess(title, notes);
+    await this.plugin.controller.stopAndProcess(title, notes, this.selectedEvent ?? undefined);
   }
 
   private async onEnhance(): Promise<void> {
@@ -248,7 +260,66 @@ export class MeetingView extends ItemView {
     }
   }
 
+  getSelectedEvent(): CalendarEvent | null {
+    return this.selectedEvent;
+  }
+
+  private renderCalendarSection(): void {
+    if (!this.calendarSection) return;
+    this.calendarSection.empty();
+
+    const calendarSync = (this.plugin as any).calendarSync;
+    if (!calendarSync || !calendarSync.isAzAvailable()) return;
+
+    if (!calendarSync.isConnected()) {
+      const hint = this.calendarSection.createDiv({ cls: "calendar-hint" });
+      hint.setText("📅 Connect M365 for auto-populated meetings");
+      return;
+    }
+
+    const events = calendarSync.getEvents() as CalendarEvent[];
+    if (events.length === 0) {
+      const hint = this.calendarSection.createDiv({ cls: "calendar-hint" });
+      hint.setText("📅 No meetings today");
+      return;
+    }
+
+    const label = this.calendarSection.createDiv({ cls: "calendar-label" });
+    label.setText("📅 Today's meetings:");
+
+    for (const event of events) {
+      const startTime = new Date(event.start.dateTime + "Z");
+      const endTime = new Date(event.end.dateTime + "Z");
+      const timeStr = `${formatTime(startTime)}–${formatTime(endTime)}`;
+      const attendeeCount = event.attendees.length;
+      const isTeams = !!event.onlineMeeting?.joinUrl;
+
+      const row = this.calendarSection.createDiv({
+        cls: `calendar-event${this.selectedEvent === event ? " selected" : ""}`,
+      });
+
+      row.createSpan({ cls: "event-time", text: timeStr });
+      row.createSpan({ cls: "event-title", text: event.subject });
+      row.createSpan({
+        cls: "event-meta",
+        text: `${attendeeCount} attendees${isTeams ? " • Teams" : ""}`,
+      });
+
+      row.addEventListener("click", () => {
+        this.selectedEvent = event;
+        if (this.titleInput) {
+          this.titleInput.value = event.subject;
+        }
+        this.renderCalendarSection();
+      });
+    }
+  }
+
   async onClose(): Promise<void> {
     // cleanup handled by plugin
   }
+}
+
+function formatTime(date: Date): string {
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
