@@ -1,4 +1,4 @@
-import { Plugin, WorkspaceLeaf } from "obsidian";
+import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
 import { MeetingNotesSettingTab } from "./src/settings";
 import { MeetingView } from "./src/meeting-view";
 import { MeetingController } from "./src/meeting-controller";
@@ -56,6 +56,17 @@ export default class MeetingNotesPlugin extends Plugin {
 
     // Settings tab
     this.addSettingTab(new MeetingNotesSettingTab(this.app, this));
+
+    // Check dependencies at startup
+    const issues = await this.controller.checkDependencies();
+    const errors = issues.filter((i) => i.severity === "error");
+    if (errors.length > 0) {
+      new Notice(
+        `Alembic — missing dependencies:\n` +
+          errors.map((e) => `• ${e.dependency}: ${e.message}`).join("\n"),
+        10000,
+      );
+    }
   }
 
   async onunload(): Promise<void> {

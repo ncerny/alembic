@@ -12,14 +12,21 @@ mkdir -p "$OUTPUT_DIR"
 echo "Building audio-capture helper..."
 swiftc \
   -O \
-  -o "$OUTPUT_DIR/audio-capture" \
+  -o "$OUTPUT_DIR/audio-capture-bin" \
   "$SCRIPT_DIR/AudioCapture.swift" \
   -framework ScreenCaptureKit \
   -framework AVFoundation \
-  -framework CoreMedia
+  -framework CoreMedia \
+  -framework Speech
 
-echo "Built: $OUTPUT_DIR/audio-capture"
+# Package as .app bundle so macOS TCC grants Speech Recognition permission
+APP_DIR="$OUTPUT_DIR/audio-capture.app/Contents"
+mkdir -p "$APP_DIR/MacOS"
+mv "$OUTPUT_DIR/audio-capture-bin" "$APP_DIR/MacOS/audio-capture"
+cp "$SCRIPT_DIR/Info.plist" "$APP_DIR/Info.plist"
+
+echo "Built: $APP_DIR/MacOS/audio-capture"
 echo ""
 echo "Usage:"
-echo "  $OUTPUT_DIR/audio-capture list"
-echo "  $OUTPUT_DIR/audio-capture capture --app 'Microsoft Teams' --output /tmp/meeting.wav"
+echo "  $APP_DIR/MacOS/audio-capture list"
+echo "  $APP_DIR/MacOS/audio-capture capture --app 'Microsoft Teams' --output /tmp/meeting.wav"

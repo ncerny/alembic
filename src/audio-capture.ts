@@ -16,7 +16,7 @@ export class AudioCapture {
   private helperPath: string;
 
   constructor(pluginDir: string) {
-    this.helperPath = join(pluginDir, "audio-capture");
+    this.helperPath = join(pluginDir, "audio-capture.app", "Contents", "MacOS", "audio-capture");
   }
 
   get isRecording(): boolean {
@@ -75,6 +75,7 @@ export class AudioCapture {
       ]);
 
       let started = false;
+      let stderrOutput = "";
 
       this.captureProcess.stdout?.on("data", (data: Buffer) => {
         const text = data.toString().trim();
@@ -94,16 +95,22 @@ export class AudioCapture {
       });
 
       this.captureProcess.stderr?.on("data", (data: Buffer) => {
-        console.log(`[audio-capture] ${data.toString().trim()}`);
+        const text = data.toString().trim();
+        console.log(`[audio-capture] ${text}`);
+        stderrOutput += text + "\n";
       });
 
       this.captureProcess.on("error", (err) => {
         if (!started) reject(err);
       });
 
-      this.captureProcess.on("exit", (code) => {
+      this.captureProcess.on("exit", (code, signal) => {
         if (!started) {
-          reject(new Error(`audio-capture exited with code ${code}`));
+          const reason = signal
+            ? `killed by signal ${signal}`
+            : `exited with code ${code}`;
+          const stderr = stderrOutput.trim();
+          reject(new Error(`audio-capture ${reason}${stderr ? `\n${stderr}` : ""}`));
         }
         this.cleanup();
       });
@@ -132,6 +139,10 @@ export class AudioCapture {
         if (data.toString().trim() === "STOPPED") {
           clearTimeout(timeout);
           this.cleanup();
+          if (!existsSync(this.outputPath)) {
+            reject(new Error("Recording finished but no audio file was created. Check Screen Recording permission in System Settings."));
+            return;
+          }
           resolve(this.outputPath);
         }
       });

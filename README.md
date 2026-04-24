@@ -1,17 +1,18 @@
 # Alembic
 
-Distill meetings into knowledge. Capture audio directly from Microsoft Teams (or any app), transcribe locally with Whisper, and generate AI-powered summaries using GitHub Copilot — all without leaving Obsidian.
+Distill meetings into knowledge. Capture audio directly from Microsoft Teams (or any app), transcribe locally with Apple's on-device Speech Recognition, and generate AI-powered summaries using GitHub Copilot — all without leaving Obsidian.
 
 ## How It Works
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Teams Call   │────▶│  Capture     │────▶│  Whisper     │────▶│  Copilot     │
+│  Teams Call   │────▶│  Capture     │────▶│  On-Device   │────▶│  Copilot     │
 │  (any app)   │     │  Audio       │     │  Transcribe  │     │  Summarize   │
-└──────────────┘     └──────┬───────┘     └──────────────┘     └──────┬───────┘
-                            │                                         │
-                    macOS ScreenCaptureKit                    GitHub Copilot SDK
-                    No bot · No virtual device               Your existing license
+└──────────────┘     └──────┬───────┘     └──────┬───────┘     └──────┬───────┘
+                            │              Apple SFSpeech-            │
+                    macOS ScreenCaptureKit  Recognizer         GitHub Copilot SDK
+                    No bot · No virtual    + vault vocabulary  Your existing license
+                    device                   hints                    │
                             │                                         │
                             ▼                                         ▼
                     ┌─────────────────────────────────────────────────────────┐
@@ -28,7 +29,8 @@ Distill meetings into knowledge. Capture audio directly from Microsoft Teams (or
 **Key features:**
 
 - 🎙 **No bot, no virtual audio device** — uses macOS ScreenCaptureKit to capture audio directly from Teams, Zoom, or any app
-- 🔒 **Privacy-first** — audio is transcribed locally with Whisper; only text is sent to the LLM
+- 🔒 **Privacy-first** — audio is transcribed locally with Apple's on-device Speech Recognition; only text is sent to the LLM
+- 🧠 **Vault-aware vocabulary** — automatically scans your vault for people, technology, and project names to improve transcription accuracy and auto-link `[[wikilinks]]`
 - ✍️ **Human-AI hybrid** — jot notes during the meeting to guide what the AI focuses on
 - 🔗 **Obsidian-native** — creates linked notes with frontmatter, `[[wikilinks]]`, action items, and tags
 
@@ -36,13 +38,13 @@ Distill meetings into knowledge. Capture audio directly from Microsoft Teams (or
 
 ## Prerequisites
 
-| Requirement                      | How to install                                                     |
-| -------------------------------- | ------------------------------------------------------------------ |
-| **macOS 13+** (Ventura or later) | Required for ScreenCaptureKit                                      |
-| **Xcode Command Line Tools**     | `xcode-select --install`                                           |
-| **Whisper.cpp**                  | `brew install whisper-cpp`                                         |
-| **GitHub Copilot CLI**           | `gh extension install github/gh-copilot`                           |
-| **GitHub Copilot license**       | [github.com/features/copilot](https://github.com/features/copilot) |
+| Requirement                        | How to install                                                     |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| **macOS 13+** (Ventura or later)   | Required for ScreenCaptureKit                                      |
+| **Xcode Command Line Tools**       | `xcode-select --install`                                           |
+| **Speech Recognition permission**  | macOS prompts on first use                                         |
+| **GitHub Copilot CLI**             | `gh extension install github/gh-copilot`                           |
+| **GitHub Copilot license**         | [github.com/features/copilot](https://github.com/features/copilot) |
 
 ## Installation
 
@@ -64,11 +66,11 @@ npm run build
 
 ```bash
 cd swift-helper
-bash build.sh
+bash build.sh    # → build/audio-capture.app
 cd ..
 ```
 
-This compiles the Swift helper that captures per-app audio using macOS ScreenCaptureKit.
+This compiles the Swift helper that captures per-app audio using macOS ScreenCaptureKit and transcribes locally with Apple's on-device SFSpeechRecognizer.
 
 ### 4. Install into Obsidian
 
@@ -80,7 +82,7 @@ PLUGIN_DIR="$VAULT_PATH/.obsidian/plugins/alembic"
 
 mkdir -p "$PLUGIN_DIR"
 cp main.js manifest.json styles.css "$PLUGIN_DIR/"
-cp build/audio-capture "$PLUGIN_DIR/"
+cp -R build/audio-capture.app "$PLUGIN_DIR/"
 ```
 
 ### 5. Enable the plugin
@@ -91,9 +93,10 @@ cp build/audio-capture "$PLUGIN_DIR/"
 
 ### 6. Grant permissions
 
-On first use, macOS will prompt you to grant **Screen Recording** permission to Obsidian. This is required for ScreenCaptureKit to capture audio from other apps.
+On first use, macOS will prompt for **Screen Recording** and **Speech Recognition** permissions.
 
 > System Settings → Privacy & Security → Screen Recording → Enable **Obsidian**
+> System Settings → Privacy & Security → Speech Recognition → Enable **audio-capture**
 
 ---
 
@@ -106,7 +109,7 @@ On first use, macOS will prompt you to grant **Screen Recording** permission to 
 3. **Click Record** — the plugin captures audio from the target app (default: Microsoft Teams)
 4. **Take notes** — jot down key points in the notes area during the meeting. These guide what the AI focuses on in the summary.
 5. **Click Stop** — recording ends and the plugin automatically:
-   - Transcribes the audio locally with Whisper
+   - Transcribes the audio locally with Apple's on-device Speech Recognition
    - Sends the transcript + your notes to GitHub Copilot for summarization
    - Creates a structured meeting note in your vault
 
@@ -171,23 +174,13 @@ Your notes from during the meeting appear here...
 
 Open Settings → Alembic:
 
-| Setting                | Description                      | Default           |
-| ---------------------- | -------------------------------- | ----------------- |
-| **Copilot model**      | LLM model for summarization      | `gpt-4o-mini`     |
-| **Target application** | App to capture audio from        | `Microsoft Teams` |
-| **Output folder**      | Where meeting notes are created  | `Meetings`        |
-| **Whisper model size** | Transcription accuracy vs. speed | `base`            |
+| Setting                    | Description                                                  | Default           |
+| -------------------------- | ------------------------------------------------------------ | ----------------- |
+| **Target application**     | App to capture audio from                                    | `Microsoft Teams` |
+| **Output folder**          | Where meeting notes are created                              | `Meetings`        |
+| **Extra vocabulary hints** | Additional terms for speech recognition (comma-separated)    | (empty)           |
 
-### Whisper model sizes
-
-| Model    | Size   | Speed   | Accuracy |
-| -------- | ------ | ------- | -------- |
-| `tiny`   | ~75MB  | Fastest | Lower    |
-| `base`   | ~150MB | Fast    | Good     |
-| `small`  | ~500MB | Medium  | Better   |
-| `medium` | ~1.5GB | Slow    | Best     |
-
-The Whisper model is downloaded automatically on first use.
+All vault note names are automatically included as vocabulary hints. Notes under Archive folders and date-prefixed notes are excluded.
 
 ---
 
@@ -200,7 +193,8 @@ alembic/
 │   ├── types.ts                 # Shared types & interfaces
 │   ├── settings.ts              # Plugin settings tab
 │   ├── audio-capture.ts         # Spawns Swift helper for audio capture
-│   ├── transcriber.ts           # Whisper.cpp integration & VTT parsing
+│   ├── transcriber.ts           # SFSpeechRecognizer integration via Swift helper
+│   ├── vault-vocab.ts           # Vault vocabulary scanning & auto-wikilinks
 │   ├── summarizer.ts            # LLM provider interface
 │   ├── providers/
 │   │   └── copilot-sdk.ts       # GitHub Copilot SDK provider
@@ -209,7 +203,7 @@ alembic/
 │   ├── meeting-controller.ts    # Orchestrator state machine
 │   └── meeting-view.ts          # Sidebar UI panel
 ├── swift-helper/
-│   ├── AudioCapture.swift       # macOS ScreenCaptureKit audio capture
+│   ├── AudioCapture.swift       # macOS ScreenCaptureKit audio capture + on-device SFSpeechRecognizer transcription
 │   └── build.sh                 # Build script for Swift helper
 ├── styles.css                   # UI styles
 └── manifest.json                # Obsidian plugin manifest
@@ -217,10 +211,10 @@ alembic/
 
 ### Data flow
 
-1. **Audio capture** — Swift helper uses ScreenCaptureKit to capture audio from the target app → writes 16kHz mono WAV
-2. **Transcription** — Whisper.cpp processes the WAV file locally → produces timestamped VTT transcript
+1. **Audio capture** — Swift helper uses ScreenCaptureKit to capture app audio + AVAudioEngine for mic → mixes and writes 48kHz mono WAV
+2. **Transcription** — Apple's on-device SFSpeechRecognizer processes the WAV file locally with vault-derived vocabulary hints → produces timestamped transcript segments
 3. **Summarization** — GitHub Copilot SDK merges transcript + user notes → returns structured JSON summary
-4. **Note creation** — Note builder generates markdown with YAML frontmatter, wikilinks, action items → saves to vault
+4. **Note creation** — Note builder generates markdown with YAML frontmatter, auto-generated wikilinks from vault names, action items → saves to vault
 
 ### Privacy model
 
@@ -229,6 +223,8 @@ alembic/
 | Audio           | Stays on your machine. Deleted after transcription. |
 | Transcript text | Sent to GitHub Copilot LLM for summarization        |
 | Meeting notes   | Stored in your Obsidian vault (local files)         |
+
+Transcription is fully on-device — no audio is sent to Apple or any other service.
 
 ---
 
@@ -260,7 +256,7 @@ cd swift-helper && bash build.sh
 - [ ] Calendar integration (MS Graph API — auto-create notes from calendar events)
 - [ ] Pull post-meeting Teams transcripts (speaker-attributed via Graph API)
 - [ ] M365 Copilot Meeting Insights integration
-- [ ] Entity extraction & auto-linking to existing vault notes
+- [ ] Audio chunking for meetings longer than 1 hour
 - [ ] Dataview integration & meeting analytics
 - [ ] Community plugin submission
 

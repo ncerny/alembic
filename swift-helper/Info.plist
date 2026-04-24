@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.alembic.audio-capture</string>
+    <key>CFBundleName</key>
+    <string>audio-capture</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Alembic uses on-device speech recognition to transcribe meeting audio.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Alembic captures audio from meeting applications for transcription.</string>
+</dict>
+</plist>

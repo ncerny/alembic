@@ -131,3 +131,30 @@
 .meeting-view-container .enhance-btn {
   flex: 1;
 }
+
+/* Dependency warnings */
+.meeting-view-container .dependency-warnings {
+  display: none;
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 0.85em;
+  background: var(--background-modifier-message);
+  border: 1px solid var(--background-modifier-border);
+}
+
+.meeting-view-container .dependency-warnings.has-errors {
+  background: rgba(var(--color-red-rgb), 0.1);
+  border-color: var(--color-red);
+}
+
+.meeting-view-container .dep-issue {
+  padding: 2px 0;
+}
+
+.meeting-view-container .dep-issue.dep-error {
+  color: var(--color-red);
+}
+
+.meeting-view-container .dep-issue.dep-warning {
+  color: var(--text-muted);
+}

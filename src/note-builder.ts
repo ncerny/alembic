@@ -1,14 +1,17 @@
 import { type App, TFolder, normalizePath } from "obsidian";
 import { formatTimestamp } from "./audio-capture";
+import { insertWikilinks } from "./vault-vocab";
 import type { MeetingData, MeetingSummary, TranscriptSegment } from "./types";
 
 export class NoteBuilder {
   private app: App;
   private outputFolder: string;
+  private knownNames: string[];
 
-  constructor(app: App, outputFolder: string) {
+  constructor(app: App, outputFolder: string, knownNames: string[] = []) {
     this.app = app;
     this.outputFolder = outputFolder;
+    this.knownNames = knownNames;
   }
 
   async createMeetingNote(data: MeetingData): Promise<string> {
@@ -39,6 +42,7 @@ export class NoteBuilder {
   private buildNoteContent(data: MeetingData): string {
     const summary = data.summary;
     const parts: string[] = [];
+    const link = (text: string) => insertWikilinks(text, this.knownNames);
 
     // Frontmatter
     parts.push("---");
@@ -67,11 +71,11 @@ export class NoteBuilder {
     parts.push(`# ${summary?.title || data.title}`);
     parts.push("");
 
-    // Summary
+    // Summary — insert wikilinks for known names
     if (summary?.summary) {
       parts.push("## Summary");
       parts.push("");
-      parts.push(summary.summary);
+      parts.push(link(summary.summary));
       parts.push("");
     }
 
@@ -80,7 +84,7 @@ export class NoteBuilder {
       parts.push("## Key Decisions");
       parts.push("");
       for (const d of summary.keyDecisions) {
-        parts.push(`- ${d}`);
+        parts.push(`- ${link(d)}`);
       }
       parts.push("");
     }
@@ -92,7 +96,7 @@ export class NoteBuilder {
       for (const item of summary.actionItems) {
         const due = item.due ? ` (due: ${item.due})` : "";
         const assignee = item.assignee ? `[[${item.assignee}]]: ` : "";
-        parts.push(`- [ ] ${assignee}${item.task}${due}`);
+        parts.push(`- [ ] ${assignee}${link(item.task)}${due}`);
       }
       parts.push("");
     }
@@ -105,7 +109,7 @@ export class NoteBuilder {
       parts.push("");
     }
 
-    // Transcript
+    // Transcript — insert wikilinks
     if (data.transcript.length > 0) {
       parts.push("## Transcript");
       parts.push("");
@@ -113,7 +117,7 @@ export class NoteBuilder {
       parts.push("<summary>Full transcript (click to expand)</summary>");
       parts.push("");
       for (const seg of data.transcript) {
-        parts.push(`[${formatTimestamp(seg.start)}] ${seg.text}`);
+        parts.push(`[${formatTimestamp(seg.start)}] ${link(seg.text)}`);
       }
       parts.push("");
       parts.push("</details>");

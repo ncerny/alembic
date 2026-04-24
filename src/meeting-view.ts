@@ -1,7 +1,7 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import type MeetingNotesPlugin from "../main";
 import { formatDuration } from "./audio-capture";
-import { MEETING_VIEW_TYPE, type MeetingState } from "./types";
+import { MEETING_VIEW_TYPE, type DependencyIssue, type MeetingState } from "./types";
 
 export class MeetingView extends ItemView {
   private plugin: MeetingNotesPlugin;
@@ -16,6 +16,7 @@ export class MeetingView extends ItemView {
   private recordBtn: HTMLButtonElement | null = null;
   private stopBtn: HTMLButtonElement | null = null;
   private enhanceBtn: HTMLButtonElement | null = null;
+  private warningsEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: MeetingNotesPlugin) {
     super(leaf);
@@ -41,6 +42,10 @@ export class MeetingView extends ItemView {
     const statusRow = container.createDiv({ cls: "status-indicator" });
     this.statusDot = statusRow.createSpan({ cls: "status-dot idle" });
     this.statusText = statusRow.createSpan({ text: "Ready" });
+
+    // Dependency warnings
+    this.warningsEl = container.createDiv({ cls: "dependency-warnings" });
+    this.renderDependencyWarnings(this.plugin.controller.dependencyIssues);
 
     // Meeting title
     this.titleInput = container.createEl("input", {
@@ -182,7 +187,7 @@ export class MeetingView extends ItemView {
     const isIdle = state === "idle" || state === "complete" || state === "error";
 
     if (this.recordBtn) {
-      this.recordBtn.disabled = !isIdle;
+      this.recordBtn.disabled = !isIdle || this.plugin.controller.hasErrors;
     }
     if (this.stopBtn) {
       this.stopBtn.disabled = !isRecording;
@@ -191,11 +196,13 @@ export class MeetingView extends ItemView {
       this.enhanceBtn.disabled = isRecording || isProcessing;
     }
 
-    // Progress visibility
+    // Progress visibility — keep visible during error so message is readable
     if (this.progressContainer) {
-      if (isProcessing) {
+      if (isProcessing || state === "error") {
         this.progressContainer.addClass("visible");
-        if (this.progressBar) this.progressBar.style.width = "100%"; // indeterminate
+        if (this.progressBar) {
+          this.progressBar.style.width = isProcessing ? "100%" : "0%";
+        }
       } else {
         this.progressContainer.removeClass("visible");
       }
@@ -213,6 +220,31 @@ export class MeetingView extends ItemView {
     // Reset timer on idle
     if (isIdle && state !== "complete" && this.timerEl) {
       this.timerEl.setText("00:00");
+    }
+  }
+
+  private renderDependencyWarnings(issues: DependencyIssue[]): void {
+    if (!this.warningsEl) return;
+    this.warningsEl.empty();
+
+    if (issues.length === 0) {
+      this.warningsEl.style.display = "none";
+      return;
+    }
+
+    this.warningsEl.style.display = "";
+    const hasErrors = issues.some((i) => i.severity === "error");
+    this.warningsEl.toggleClass("has-errors", hasErrors);
+
+    for (const issue of issues) {
+      const row = this.warningsEl.createDiv({ cls: `dep-issue dep-${issue.severity}` });
+      const icon = issue.severity === "error" ? "⛔" : "⚠️";
+      row.setText(`${icon} ${issue.dependency}: ${issue.message}`);
+    }
+
+    // Disable record button if critical deps are missing
+    if (this.recordBtn && hasErrors) {
+      this.recordBtn.disabled = true;
     }
   }
 

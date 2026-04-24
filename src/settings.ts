@@ -1,10 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type MeetingNotesPlugin from "../main";
-import {
-  AVAILABLE_MODELS,
-  WHISPER_MODEL_OPTIONS,
-  type MeetingNotesSettings,
-} from "./types";
+import type { MeetingNotesSettings } from "./types";
 
 export class MeetingNotesSettingTab extends PluginSettingTab {
   plugin: MeetingNotesPlugin;
@@ -19,21 +15,6 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     containerEl.createEl("h2", { text: "Alembic Settings" });
-
-    // LLM Model selection
-    new Setting(containerEl)
-      .setName("Copilot model")
-      .setDesc("LLM model for meeting summarization (requires GitHub Copilot CLI)")
-      .addDropdown((dropdown) => {
-        for (const model of AVAILABLE_MODELS) {
-          dropdown.addOption(model.value, model.label);
-        }
-        dropdown.setValue(this.plugin.settings.model);
-        dropdown.onChange(async (value) => {
-          this.plugin.settings.model = value;
-          await this.plugin.saveSettings();
-        });
-      });
 
     // Target application
     new Setting(containerEl)
@@ -61,18 +42,24 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
         });
       });
 
-    // Whisper model size
+    // Vocabulary hints
     new Setting(containerEl)
-      .setName("Whisper model size")
-      .setDesc("Larger models are more accurate but slower and use more disk space")
-      .addDropdown((dropdown) => {
-        for (const opt of WHISPER_MODEL_OPTIONS) {
-          dropdown.addOption(opt.value, opt.label);
-        }
-        dropdown.setValue(this.plugin.settings.whisperModelSize);
-        dropdown.onChange(async (value) => {
-          this.plugin.settings.whisperModelSize =
-            value as MeetingNotesSettings["whisperModelSize"];
+      .setName("Extra vocabulary hints")
+      .setDesc(
+        "Comma-separated terms to add beyond what's auto-detected from vault notes " +
+        "(e.g., acronyms, brand names not in your vault). All vault note names are " +
+        "automatically included — notes under Archive folders and date-prefixed notes are excluded.",
+      )
+      .addTextArea((text) => {
+        text.setPlaceholder("Dynatrace, Splunk, Kubernetes, Zabbix");
+        text.setValue(this.plugin.settings.vocabularyHints.join(", "));
+        text.inputEl.rows = 3;
+        text.inputEl.cols = 40;
+        text.onChange(async (value) => {
+          this.plugin.settings.vocabularyHints = value
+            .split(",")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
           await this.plugin.saveSettings();
         });
       });
@@ -85,13 +72,14 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
       <p><strong>Prerequisites:</strong></p>
       <ol>
         <li><strong>GitHub Copilot CLI</strong> — Install and authenticate: <code>gh extension install github/gh-copilot</code></li>
-        <li><strong>Whisper.cpp</strong> — Install via: <code>brew install whisper-cpp</code></li>
         <li><strong>Audio capture helper</strong> — Build the Swift helper: <code>cd swift-helper && bash build.sh</code></li>
         <li><strong>Screen Recording permission</strong> — macOS will prompt on first capture</li>
+        <li><strong>Speech Recognition permission</strong> — macOS will prompt on first transcription</li>
       </ol>
       <p><strong>How it works:</strong></p>
-      <p>The plugin uses macOS ScreenCaptureKit to capture audio directly from the target application (e.g., Teams). 
-      No virtual audio device needed — just grant Screen Recording permission when prompted.</p>
+      <p>The plugin uses macOS ScreenCaptureKit to capture audio from the target application, 
+      Apple's on-device Speech Recognition for transcription (no internet required), 
+      and GitHub Copilot for AI summarization.</p>
     `;
   }
 }

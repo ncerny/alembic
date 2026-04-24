@@ -1,31 +1,14 @@
 export interface MeetingNotesSettings {
-  model: string;
   targetApp: string;
   outputFolder: string;
-  whisperModelSize: WhisperModelSize;
+  vocabularyHints: string[];
 }
 
-export type WhisperModelSize = "tiny" | "base" | "small" | "medium";
-
 export const DEFAULT_SETTINGS: MeetingNotesSettings = {
-  model: "gpt-4o-mini",
   targetApp: "Microsoft Teams",
   outputFolder: "Meetings",
-  whisperModelSize: "base",
+  vocabularyHints: [],
 };
-
-export const AVAILABLE_MODELS = [
-  { value: "gpt-4.1", label: "GPT-4.1 (1M context)" },
-  { value: "gpt-4o", label: "GPT-4o (128K context)" },
-  { value: "gpt-4o-mini", label: "GPT-4o mini (128K, fast)" },
-];
-
-export const WHISPER_MODEL_OPTIONS: { value: WhisperModelSize; label: string }[] = [
-  { value: "tiny", label: "Tiny (~75MB, fastest, lower accuracy)" },
-  { value: "base", label: "Base (~150MB, balanced)" },
-  { value: "small", label: "Small (~500MB, better accuracy)" },
-  { value: "medium", label: "Medium (~1.5GB, best accuracy)" },
-];
 
 export type MeetingState =
   | "idle"
@@ -63,6 +46,12 @@ export interface MeetingData {
   summary?: MeetingSummary;
   recordingDuration: number;
   date: string;
+}
+
+export interface DependencyIssue {
+  dependency: string;
+  message: string;
+  severity: "error" | "warning";
 }
 
 export const MEETING_VIEW_TYPE = "alembic-view";
