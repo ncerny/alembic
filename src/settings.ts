@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type MeetingNotesPlugin from "../main";
 import type { MeetingNotesSettings } from "./types";
+import type { CalendarSync } from "./calendar-sync";
 
 export class MeetingNotesSettingTab extends PluginSettingTab {
   plugin: MeetingNotesPlugin;
@@ -60,6 +61,49 @@ export class MeetingNotesSettingTab extends PluginSettingTab {
             .split(",")
             .map((s) => s.trim())
             .filter((s) => s.length > 0);
+          await this.plugin.saveSettings();
+        });
+      });
+
+    // --- Microsoft 365 Integration ---
+    containerEl.createEl("h3", { text: "Microsoft 365 Integration" });
+
+    const m365Status = containerEl.createDiv({ cls: "setting-item-description" });
+    const calendarSync = (this.plugin as any).calendarSync as CalendarSync | null;
+    if (!calendarSync?.isAzAvailable()) {
+      m365Status.innerHTML = `<p>⛔ Azure CLI not found. Install: <code>brew install azure-cli</code></p>`;
+    } else if (!calendarSync?.isConnected()) {
+      m365Status.innerHTML = `
+        <p>⚠️ Not connected to Microsoft 365.</p>
+        <p>Run in terminal: <code>${calendarSync.getLoginCommand()}</code></p>
+      `;
+    } else {
+      m365Status.innerHTML = `<p>✅ Connected to Microsoft 365</p>`;
+    }
+
+    // People folder
+    new Setting(containerEl)
+      .setName("People folder")
+      .setDesc("Folder where person notes are auto-created from meeting attendees")
+      .addText((text) => {
+        text.setPlaceholder("People");
+        text.setValue(this.plugin.settings.peopleFolderPath);
+        text.onChange(async (value) => {
+          this.plugin.settings.peopleFolderPath = value || "People";
+          await this.plugin.saveSettings();
+        });
+      });
+
+    // Calendar polling interval
+    new Setting(containerEl)
+      .setName("Calendar polling interval")
+      .setDesc("How often to refresh calendar events (in minutes)")
+      .addText((text) => {
+        text.setPlaceholder("5");
+        text.setValue(String(this.plugin.settings.calendarPollingMinutes));
+        text.onChange(async (value) => {
+          const num = parseInt(value) || 5;
+          this.plugin.settings.calendarPollingMinutes = Math.max(1, Math.min(60, num));
           await this.plugin.saveSettings();
         });
       });
