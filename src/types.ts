@@ -2,12 +2,16 @@ export interface MeetingNotesSettings {
   targetApp: string;
   outputFolder: string;
   vocabularyHints: string[];
+  peopleFolderPath: string;
+  calendarPollingMinutes: number;
 }
 
 export const DEFAULT_SETTINGS: MeetingNotesSettings = {
   targetApp: "Microsoft Teams",
   outputFolder: "Meetings",
   vocabularyHints: [],
+  peopleFolderPath: "People",
+  calendarPollingMinutes: 5,
 };
 
 export type MeetingState =
@@ -52,6 +56,47 @@ export interface DependencyIssue {
   dependency: string;
   message: string;
   severity: "error" | "warning";
+}
+
+// --- Microsoft Graph / Calendar types ---
+
+export interface GraphAttendee {
+  emailAddress: {
+    name: string;
+    address: string;
+  };
+  type: "required" | "optional" | "resource";
+  status?: {
+    response: string;
+    time?: string;
+  };
+}
+
+export interface CalendarEvent {
+  subject: string;
+  start: { dateTime: string; timeZone: string };
+  end: { dateTime: string; timeZone: string };
+  attendees: GraphAttendee[];
+  onlineMeeting?: {
+    joinUrl: string;
+  };
+  organizer?: {
+    emailAddress: {
+      name: string;
+      address: string;
+    };
+  };
+  body?: {
+    contentType: string;
+    content: string;
+  };
+  location?: {
+    displayName: string;
+  };
+}
+
+export interface CalendarViewResponse {
+  value: CalendarEvent[];
 }
 
 export const MEETING_VIEW_TYPE = "alembic-view";
