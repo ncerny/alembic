@@ -1,6 +1,8 @@
 import { requestUrl } from "obsidian";
 import type { CalendarEvent, GraphAttendee } from "./types";
 import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const AZ_PATHS = [
@@ -9,6 +11,38 @@ const AZ_PATHS = [
   "/usr/bin/az",
 ];
 const FLOW_RESOURCE = "https://service.flow.microsoft.com";
+const CERT_BUNDLE_PATH = path.join(os.tmpdir(), "alembic-ca-bundle.pem");
+const CERT_BUNDLE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // rebuild daily
+
+/**
+ * Build a CA bundle from macOS system keychains so `az` can verify
+ * corporate proxy certificates that aren't in Python's certifi bundle.
+ */
+function ensureCertBundle(): string {
+  try {
+    const stat = fs.statSync(CERT_BUNDLE_PATH);
+    if (Date.now() - stat.mtimeMs < CERT_BUNDLE_MAX_AGE_MS) {
+      return CERT_BUNDLE_PATH;
+    }
+  } catch { /* doesn't exist yet */ }
+
+  try {
+    const { execFileSync } = require("child_process");
+    const keychainCerts = execFileSync(
+      "/usr/bin/security",
+      ["find-certificate", "-a", "-p",
+       "/System/Library/Keychains/SystemRootCertificates.keychain",
+       "/Library/Keychains/System.keychain"],
+      { encoding: "utf-8", timeout: 10_000 },
+    );
+    fs.writeFileSync(CERT_BUNDLE_PATH, keychainCerts, "utf-8");
+    console.log("[alembic] Built CA bundle from system keychains");
+    return CERT_BUNDLE_PATH;
+  } catch (e) {
+    console.warn("[alembic] Failed to build CA bundle:", e);
+    return "";
+  }
+}
 
 export class CalendarAgent {
   private flowUrl: string;
@@ -36,12 +70,18 @@ export class CalendarAgent {
       );
     }
 
+    const certBundle = ensureCertBundle();
+    const env: Record<string, string> = { ...process.env } as any;
+    if (certBundle) {
+      env.REQUESTS_CA_BUNDLE = certBundle;
+    }
+
     const { execFile } = require("child_process");
     return new Promise<string>((resolve, reject) => {
       execFile(
         azBin,
         ["account", "get-access-token", "--resource", FLOW_RESOURCE, "--query", "accessToken", "-o", "tsv"],
-        { encoding: "utf-8", timeout: 15_000 },
+        { encoding: "utf-8", timeout: 15_000, env },
         (err: any, stdout: string, stderr: string) => {
           if (err) {
             reject(new Error(`az token failed: ${stderr || err.message}`));
