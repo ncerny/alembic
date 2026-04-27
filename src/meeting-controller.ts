@@ -33,8 +33,8 @@ export class MeetingController {
 
   constructor(plugin: MeetingNotesPlugin) {
     this.plugin = plugin;
-    this.audioCapture = new AudioCapture(this.getPluginDir());
-    this.transcriber = new Transcriber(this.getPluginDir());
+    this.audioCapture = new AudioCapture(this.getHelperDir());
+    this.transcriber = new Transcriber(this.getHelperDir());
   }
 
   get state(): MeetingState {
@@ -304,5 +304,10 @@ export class MeetingController {
     const adapter = this.plugin.app.vault.adapter as any;
     const basePath = adapter.getBasePath?.() || "";
     return `${basePath}/.obsidian/plugins/alembic`;
+  }
+
+  /** App bundle path outside iCloud-managed Documents (Launch Services can't open apps from iCloud dirs). */
+  private getHelperDir(): string {
+    return `${process.env.HOME}/Library/Application Support/alembic`;
   }
 }
