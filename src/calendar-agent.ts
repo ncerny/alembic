@@ -116,8 +116,14 @@ export class CalendarAgent {
 
     const token = await this.getBearerToken();
 
+    // Strip SAS query params — API rejects requests with both SAS and Bearer
+    const url = new URL(this.flowUrl);
+    url.searchParams.delete("sig");
+    url.searchParams.delete("sp");
+    url.searchParams.delete("sv");
+
     const response = await requestUrl({
-      url: this.flowUrl,
+      url: url.toString(),
       method: "POST",
       headers: {
         "Content-Type": "application/json",
