@@ -58,13 +58,13 @@ function parseFlowUrl(url: string): { flowId: string; envId: string } | null {
     const wfMatch = u.pathname.match(/\/workflows\/([a-f0-9]+)\//i);
     if (!wfMatch) return null;
 
-    // Extract tenant ID from hostname: default{tenantNoHyphens}.{num}.environment...
-    // The env ID format is "Default-{uuid}" where uuid comes from the hostname
-    const hostMatch = u.hostname.match(/^default([a-f0-9]+)\./i);
+    // Extract tenant ID from hostname: default{part1}.{part2}.environment...
+    // The full tenant ID (no hyphens) is split across two subdomain labels
+    const hostMatch = u.hostname.match(/^default([a-f0-9]+)\.([a-f0-9]+)\.environment/i);
     if (!hostMatch) return null;
 
-    // Reconstruct the UUID with hyphens: 8-4-4-4-12
-    const raw = hostMatch[1];
+    // Combine both parts and reconstruct the UUID with hyphens: 8-4-4-4-12
+    const raw = hostMatch[1] + hostMatch[2];
     const uuid = `${raw.slice(0, 8)}-${raw.slice(8, 12)}-${raw.slice(12, 16)}-${raw.slice(16, 20)}-${raw.slice(20, 32)}`;
     return { flowId: wfMatch[1], envId: `Default-${uuid}` };
   } catch {
