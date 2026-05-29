@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.alembic.app</string>
+    <key>CFBundleName</key>
+    <string>Alembic</string>
+    <key>CFBundleExecutable</key>
+    <string>Alembic</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <!-- Menu-bar-only app: no Dock icon, no main window on launch. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Alembic uses on-device speech recognition to transcribe meeting audio in real time.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Alembic captures your microphone to transcribe what you say in the meeting.</string>
+</dict>
+</plist>
