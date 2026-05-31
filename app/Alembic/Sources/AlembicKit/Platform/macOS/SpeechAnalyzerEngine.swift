@@ -41,11 +41,12 @@ import Speech
 ///   coalescing policy); finalized events are emitted unconditionally.
 ///
 /// ## Timestamps
-/// Each `AnalyzerInput` is stamped with a **session-relative audio time** derived
-/// from `AudioChunk.startTime` via `AudioInputCursor` (monotonic; silence gaps
-/// preserved, overlaps clamped). Emitted `TranscriptEvent.start/.end` prefer the
-/// recognizer's own audio range and fall back to the engine's audio cursor —
-/// never wall clock.
+/// Emitted `TranscriptEvent.start/.end` prefer the recognizer's own audio range
+/// and fall back to the engine's audio cursor — never wall clock. Note we feed
+/// **untimed** `AnalyzerInput`s (no `bufferStartTime`): on macOS 26, stamping the
+/// input with an explicit start time causes `SpeechAnalyzer` to emit no results.
+/// Because each engine is fed contiguous audio from session start, the
+/// recognizer's `result.range` already lands on the session-relative timeline.
 ///
 /// > Manual gate: the live `SpeechAnalyzer` path cannot run headlessly. Its pure
 /// > sub-parts (`TranscriptEventMapper`, `AudioInputCursor`,
@@ -139,6 +140,8 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         guard chunk.source == source else { return }
         guard let builder = inputBuilder else { return }
 
+        // Track a session-relative cursor purely for FALLBACK event timestamps
+        // (used only when a result carries no audio range of its own).
         let startSeconds = cursor.bufferStart(for: chunk)
         lastInputStart = startSeconds
 
@@ -149,8 +152,13 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
             return
         }
 
-        let time = CMTime(seconds: startSeconds, preferredTimescale: 1_000_000)
-        let yieldResult = builder.yield(AnalyzerInput(buffer: converted, bufferStartTime: time))
+        // IMPORTANT: do NOT pass a `bufferStartTime`. Stamping `AnalyzerInput`
+        // with an explicit start time makes SpeechAnalyzer emit *no* results at
+        // all (empirically verified on macOS 26 via the EngineProbe harness and
+        // the Milestone-0 spike, which also feeds untimed inputs). We feed
+        // contiguous audio from session start, so the recognizer's own
+        // `result.range` already lands on the session-relative timeline.
+        let yieldResult = builder.yield(AnalyzerInput(buffer: converted))
         switch yieldResult {
         case .enqueued:
             backpressure.recordEnqueued()

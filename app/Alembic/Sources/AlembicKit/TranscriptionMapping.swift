@@ -100,20 +100,24 @@ public enum TranscriptEventMapper {
     }
 }
 
-/// A monotonic, session-relative audio-time cursor for feeding `AnalyzerInput`.
+/// A monotonic, session-relative audio-time cursor used for **fallback** event
+/// timestamps.
 ///
 /// ## Why this exists
-/// The engine must stamp each analyzer input with a **session-relative audio
-/// time** (`AudioChunk.startTime`), never wall clock. This pure value type
-/// centralizes — and makes testable — the gap/overlap policy:
+/// The engine prefers each recognizer result's own audio range for
+/// `TranscriptEvent.start/.end`. When a result carries no range, the engine falls
+/// back to this cursor's session-relative position. (It is *not* fed to
+/// `AnalyzerInput` as a `bufferStartTime` — doing so makes SpeechAnalyzer emit no
+/// results on macOS 26.) This pure value type centralizes — and makes testable —
+/// the gap/overlap policy:
 ///
 /// - **Normal flow / silence gaps:** a chunk whose `startTime` is at or ahead of
 ///   the cursor is honored exactly, so genuine silence gaps are preserved on the
-///   timeline (the analyzer sees the real elapsed audio time).
+///   timeline.
 /// - **Overlap / dropped-buffer recovery / device changes:** a chunk whose
 ///   `startTime` is *behind* the cursor (out of order, or after a clock glitch)
-///   is clamped to the cursor so audio time never moves backwards into the
-///   analyzer, which would corrupt result ordering.
+///   is clamped to the cursor so audio time never moves backwards, which would
+///   corrupt result ordering.
 ///
 /// The cursor advances to the end of whichever window it returned.
 public struct AudioInputCursor: Sendable, Equatable {
@@ -124,9 +128,9 @@ public struct AudioInputCursor: Sendable, Equatable {
         self.lastEnd = lastEnd
     }
 
-    /// Returns the session-relative `bufferStartTime` (seconds) to feed
-    /// `AnalyzerInput` for `chunk`, applying the monotonic gap/overlap policy and
-    /// advancing the cursor by the chunk's duration.
+    /// Returns the session-relative start time (seconds) for `chunk`, applying the
+    /// monotonic gap/overlap policy and advancing the cursor by the chunk's
+    /// duration. Used as the fallback when a recognizer result has no audio range.
     public mutating func bufferStart(for chunk: AudioChunk) -> Double {
         let start = Swift.max(chunk.startTime, lastEnd)
         lastEnd = Swift.max(lastEnd, start + chunk.duration)
