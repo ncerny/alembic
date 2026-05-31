@@ -53,6 +53,10 @@ struct AlembicMenu: View {
 
         Button("Open Live Transcript") {
             openWindow(id: AppModel.liveWindowID)
+            // A menu-bar-only app (LSUIElement) is not the active app, so a newly
+            // opened window stays buried behind other apps. Activate ourselves so
+            // the transcript window actually comes to the front.
+            NSApplication.shared.activate(ignoringOtherApps: true)
         }
 
         Button("Reveal Transcript in Finder") {

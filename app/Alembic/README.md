@@ -23,22 +23,53 @@ machine (see [Privacy](#privacy)).
 
 ```bash
 cd app/Alembic
-bash build.sh          # clean release build → assemble → ad-hoc sign → verify
-bash build.sh --run    # same, then `open` the built app
-bash build.sh --help   # usage
+bash build.sh --make-cert   # ONE TIME: create a stable signing cert (see below)
+bash build.sh               # clean release build → assemble → sign → verify
+bash build.sh --run         # same, then `open` the built app
+bash build.sh --reset-tcc   # clear Alembic's permission grants (re-grant on launch)
+bash build.sh --help        # usage
 ```
 
 `build.sh` is the **canonical packaging entry point**. It:
 
 1. Performs a clean SwiftPM release build (Swift 6 strict concurrency).
 2. Assembles `build/Alembic.app` (copies the executable + `Info.plist`).
-3. **Ad-hoc codesigns** the bundle (`codesign --force --sign -`) so it has a
-   stable identity for macOS TCC permission grants.
+3. **Codesigns** the bundle — with a stable identity when one is available
+   (see [Signing & permissions](#signing--permissions)), otherwise ad-hoc.
 4. **Verifies** the signature (`codesign --verify`) before reporting success.
 5. Prints run instructions and the transcript output location.
 
 The app is **menu-bar-only** (`LSUIElement`): after launch there is no Dock icon
 and no window — look for the Alembic icon in the macOS menu bar.
+
+## Signing & permissions
+
+macOS TCC keys permission grants — **especially Screen Recording** — to the
+app's **code signature**. An *ad-hoc* signature (`codesign --sign -`) has no
+stable identity: its hash changes on every rebuild, so each rebuilt binary looks
+like a brand-new app and **previously-granted permissions stop applying** (System
+Settings may still show a stale "Alembic" toggle that no longer matches the
+running binary — the app then reports Screen Recording as not granted even though
+it looks enabled).
+
+To make grants survive rebuilds, sign with a **stable identity**:
+
+```bash
+bash build.sh --make-cert   # creates a persistent self-signed code-signing cert
+bash build.sh --run         # auto-detects the cert and signs with it
+bash build.sh --reset-tcc   # ONCE: clear stale ad-hoc grants, then re-grant on launch
+```
+
+`--make-cert` creates a self-signed certificate named **"Alembic Self-Signed"**
+in your login keychain. It is intentionally untrusted by Gatekeeper (irrelevant
+for an app you run yourself) but gives the bundle a **stable Designated
+Requirement** (`identifier "com.alembic.app" and certificate leaf = H"…"`), so
+TCC grants persist across rebuilds. To use a real identity instead:
+
+```bash
+ALEMBIC_CODESIGN_IDENTITY="Apple Development: you@example.com" bash build.sh
+```
+
 
 ## Test
 

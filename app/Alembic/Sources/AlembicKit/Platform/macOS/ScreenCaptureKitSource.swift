@@ -114,8 +114,14 @@ public actor ScreenCaptureKitSource: AudioSource {
 
     public func availableTargets() async throws -> [CaptureTarget] {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        // The raw application list contains hundreds of windowless background
+        // agents/daemons that can never be a meeting's audio source. Restrict the
+        // picker to apps that actually own a window (visible or minimized) — i.e.
+        // the GUI apps a meeting could be running in. The user can still re-run
+        // "Refresh Targets" if an app appears late.
+        let windowedAppPIDs = Set(content.windows.compactMap { $0.owningApplication?.processID })
         return content.applications
-            .filter { !$0.applicationName.isEmpty }
+            .filter { !$0.applicationName.isEmpty && windowedAppPIDs.contains($0.processID) }
             .sorted { $0.applicationName.localizedCaseInsensitiveCompare($1.applicationName) == .orderedAscending }
             .map(Self.target(for:))
     }
