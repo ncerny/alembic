@@ -48,6 +48,34 @@ test, settings, and transcript format documentation.
 - 📄 **Crash-safe output** — each segment is flushed to disk immediately; a crash mid-meeting leaves a fully parseable transcript
 - 🧾 **Two formats** — canonical `.jsonl` (one `FinalizedSegmentDTO` per line) and a human-readable `.md` side-car
 
+## Vocabulary hints
+
+On-device speech recognition works best when it knows the words it's likely to
+hear. The **Settings** window (menu bar icon → **Settings…**) lets you configure
+up to ~500 hint terms that are loaded before each recording session.
+
+Three sources are supported and merged in priority order:
+
+| Source | What to enter | Format |
+|---|---|---|
+| **Inline** | Comma-separated terms typed directly into the field | `Dynatrace, Kubernetes, Jane Doe` |
+| **File** | Path to a plain-text file (use **Browse…** to pick) | One term per line; lines starting with `#` are comments |
+| **Folder** | Path to a folder of Markdown notes (use **Browse…** to pick) | File basenames become hints automatically |
+
+When the total exceeds ~500 terms, folder terms are dropped first to stay within
+Apple's recommended limit. A **Preview** button shows the per-source counts and
+flags truncation before you record.
+
+**Name handling:** multi-word names are expanded automatically. `Jane Doe` adds
+`Jane`, `Doe`, and `Jane Doe` as separate hints. `Doe, Jane`
+(Last, First format) adds `Doe`, `Jane`, and `Jane Doe`.
+Date-prefixed filenames (`2026-06-01 …`) and anything inside an `Archive/`
+folder are skipped.
+
+> **Folder tip:** point the folder source at any collection of Markdown notes
+> whose filenames are people or project names — they'll automatically bias
+> transcription toward whoever and whatever your meetings are about.
+
 ## What it produces
 
 ```
