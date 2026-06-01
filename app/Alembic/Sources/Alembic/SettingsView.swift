@@ -120,11 +120,11 @@ struct SettingsView: View {
                 TextField("Term", text: source.value)
                     .textFieldStyle(.roundedBorder)
             case .file:
-                TextField("~/path/to/vocabulary.txt", text: source.value)
+                TextField("Vocabulary file path", text: source.value)
                     .textFieldStyle(.roundedBorder)
                 Button("Browse…") { browse(source, directories: false) }
             case .directory:
-                TextField("~/path/to/folder", text: source.value)
+                TextField("Folder path", text: source.value)
                     .textFieldStyle(.roundedBorder)
                 Button("Browse…") { browse(source, directories: true) }
             }
