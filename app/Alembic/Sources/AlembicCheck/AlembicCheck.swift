@@ -1033,5 +1033,110 @@ struct AlembicCheck {
             )
             s.expect(!result.truncated, "not truncated when within limit")
         }
+
+        // MARK: Source-based loading
+
+        s.check("normalizeFilename: underscores and dashes become spaces") { s in
+            s.expectEqual(VocabularyStore.normalizeFilename("jane_doe"), "jane doe", "underscore → space")
+            s.expectEqual(VocabularyStore.normalizeFilename("kube-proxy"), "kube proxy", "dash → space")
+            s.expectEqual(VocabularyStore.normalizeFilename("a__b--c"), "a b c", "runs collapse")
+        }
+
+        s.check("load(sources:): word source added verbatim") { s in
+            let result = VocabularyStore.load(sources: [
+                .init(kind: .word, value: "Kubernetes")
+            ])
+            s.expectEqual(result.terms, ["Kubernetes"], "word becomes a single term")
+            s.expectEqual(result.perSourceTermCounts, [1], "one term from one source")
+        }
+
+        s.check("load(sources:): order = priority under truncation") { s in
+            let result = VocabularyStore.load(sources: [
+                .init(kind: .word, value: "First"),
+                .init(kind: .word, value: "Second"),
+                .init(kind: .word, value: "Third")
+            ], maxTerms: 2)
+            s.expectEqual(result.terms, ["First", "Second"], "earliest sources win")
+            s.expect(result.truncated, "truncated flag set")
+        }
+
+        s.check("load(sources:): file source with tilde + space in path") { s in
+            // Build a path containing a space under the temp directory, then
+            // express it relative to HOME with a leading "~" to exercise both
+            // the space and tilde-expansion fixes.
+            let home = NSHomeDirectory()
+            let dirName = "alembic vocab check \(Int.random(in: 0..<1_000_000))"
+            let dirURL = URL(fileURLWithPath: home).appendingPathComponent(dirName)
+            let fm = FileManager.default
+            try? fm.createDirectory(at: dirURL, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: dirURL) }
+            let fileURL = dirURL.appendingPathComponent("terms.txt")
+            try "Dynatrace\nZabbix\n".write(to: fileURL, atomically: true, encoding: .utf8)
+
+            let tildePath = "~/\(dirName)/terms.txt"
+            let result = VocabularyStore.load(sources: [
+                .init(kind: .file, value: tildePath)
+            ])
+            s.expect(result.terms.contains("Dynatrace"), "tilde+space file path resolved")
+            s.expect(result.terms.contains("Zabbix"), "second term loaded")
+        }
+
+        s.check("load(sources:): directory listing → normalized filenames") { s in
+            let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("alembic-vocab-dir-\(Int.random(in: 0..<1_000_000))")
+            let fm = FileManager.default
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? fm.removeItem(at: dir) }
+            try "".write(to: dir.appendingPathComponent("jane_doe.md"), atomically: true, encoding: .utf8)
+            try "".write(to: dir.appendingPathComponent("kube-proxy.txt"), atomically: true, encoding: .utf8)
+            try? fm.createDirectory(at: dir.appendingPathComponent("subdir"), withIntermediateDirectories: true)
+
+            let result = VocabularyStore.load(sources: [
+                .init(kind: .directory, value: dir.path)
+            ])
+            s.expect(result.terms.contains("jane doe"), "underscore filename normalized")
+            s.expect(result.terms.contains("kube proxy"), "dash filename normalized, extension dropped")
+            s.expect(!result.terms.contains("subdir"), "subdirectories excluded")
+        }
+
+        s.check("encode/decode sources round-trips") { s in
+            let original: [VocabularyStore.VocabularySource] = [
+                .init(kind: .word, value: "Splunk"),
+                .init(kind: .file, value: "~/a b/v.txt"),
+                .init(kind: .directory, value: "/tmp/notes")
+            ]
+            let decoded = VocabularyStore.decodeSources(VocabularyStore.encodeSources(original))
+            s.expectEqual(decoded, original, "round-trip preserves sources")
+            s.expectEqual(VocabularyStore.decodeSources(""), [], "empty string → no sources")
+            s.expectEqual(VocabularyStore.decodeSources("not json"), [], "malformed → no sources")
+        }
+
+        s.check("migratedSources: inline → words, file, folder order") { s in
+            let migrated = VocabularyStore.migratedSources(
+                inline: "Alpha, Beta",
+                filePath: "/tmp/v.txt",
+                folderPath: "/tmp/vault"
+            )
+            s.expectEqual(migrated.count, 4, "2 words + file + folder")
+            s.expectEqual(migrated[0].kind, .word, "first is a word")
+            s.expectEqual(migrated[0].value, "Alpha", "first inline word")
+            s.expectEqual(migrated[2].kind, .file, "file after words")
+            s.expectEqual(migrated[3].kind, .directory, "folder last")
+        }
+
+        s.check("configuredSources: migrates legacy keys when sources key absent") { s in
+            let suite = "alembic-test-\(Int.random(in: 0..<1_000_000))"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set("Gamma", forKey: "alembic.vocabulary.inline")
+            let migrated = VocabularyStore.configuredSources(defaults: defaults)
+            s.expectEqual(migrated.count, 1, "one migrated word")
+            s.expectEqual(migrated.first?.value, "Gamma", "legacy inline migrated")
+
+            // Explicit sources key (even empty) takes precedence over legacy keys.
+            defaults.set("[]", forKey: VocabularyStore.sourcesDefaultsKey)
+            s.expectEqual(VocabularyStore.configuredSources(defaults: defaults).count, 0,
+                          "explicit empty sources key overrides legacy migration")
+        }
     }
 }

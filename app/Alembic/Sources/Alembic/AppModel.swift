@@ -209,24 +209,14 @@ final class AppModel {
         progressTask?.cancel()
 
         // Load vocabulary off the main actor (file I/O may be slow for large folders).
-        let vocabResult = await Task.detached(priority: .userInitiated) {
-            let filePath = UserDefaults.standard.string(forKey: "alembic.vocabulary.filePath")
-                .flatMap { $0.isEmpty ? nil : $0 }
-            let folderPath = UserDefaults.standard.string(forKey: "alembic.vocabulary.folderPath")
-                .flatMap { $0.isEmpty ? nil : $0 }
-            return VocabularyStore.load(
-                filePath: filePath,
-                folderPath: folderPath,
-                inlineTerms: (UserDefaults.standard.string(forKey: "alembic.vocabulary.inline") ?? "")
-                    .components(separatedBy: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-            )
+        let (sourceCount, vocabResult) = await Task.detached(priority: .userInitiated) {
+            let sources = VocabularyStore.configuredSources()
+            return (sources.count, VocabularyStore.load(sources: sources))
         }.value
         vocabularyBox.set(vocabResult.terms)
-        print("[alembic] Vocabulary loaded: \(vocabResult.inlineCount) inline, " +
-              "\(vocabResult.fileCount) file, \(vocabResult.folderCount) folder " +
-              "= \(vocabResult.terms.count) total\(vocabResult.truncated ? " (truncated)" : "")")
+        print("[alembic] Vocabulary loaded: \(vocabResult.terms.count) terms " +
+              "from \(sourceCount) source\(sourceCount == 1 ? "" : "s")" +
+              "\(vocabResult.truncated ? " (truncated)" : "")")
 
         await session.start(target: target)
     }

@@ -3,11 +3,16 @@ import Foundation
 /// Loads and normalizes vocabulary hints from multiple sources for on-device
 /// speech recognition (`AnalysisContext.contextualStrings`).
 ///
-/// Sources are merged in **priority order** so explicitly entered terms are
-/// never dropped in favour of folder noise:
-/// 1. Inline terms (settings text field)
-/// 2. Plain-text vocabulary file (one term per line)
-/// 3. Markdown folder scan (`.md` basenames, "Last, First" expansion)
+/// The current model is an ordered list of `VocabularySource`s (see
+/// `load(sources:)`). Sources are evaluated **in order**, so earlier sources
+/// have higher priority when the combined term count exceeds the limit:
+/// - `.word`      — a single literal term
+/// - `.file`      — plain-text file (one term per line, `#` comments)
+/// - `.directory` — file listing (extension dropped, `_`/`-` → spaces)
+///
+/// Paths may contain spaces and a leading `~` (expanded via
+/// `expandingTildeInPath`). A legacy three-key API (`load(filePath:folderPath:
+/// inlineTerms:)`) is retained for backward compatibility.
 ///
 /// Apple recommends keeping `contextualStrings` under ~500 terms for optimal
 /// recognition quality; the limit is enforced by truncating lower-priority
@@ -16,6 +21,52 @@ public enum VocabularyStore {
 
     /// Practical limit Apple recommends for `contextualStrings`.
     public static let recommendedMaxTerms = 500
+
+    /// `UserDefaults` key holding the JSON-encoded `[VocabularySource]` list.
+    public static let sourcesDefaultsKey = "alembic.vocabulary.sources"
+
+    // MARK: - Source model
+
+    /// A single user-configured vocabulary source.
+    ///
+    /// Sources are evaluated **in order**, so the first source has the highest
+    /// priority when the combined term count exceeds `recommendedMaxTerms`.
+    public struct VocabularySource: Codable, Sendable, Equatable, Identifiable {
+        /// How the source's `value` is interpreted.
+        public enum Kind: String, Codable, Sendable, CaseIterable {
+            /// A single literal term added to the custom library.
+            case word
+            /// A plain-text file whose contents become vocabulary
+            /// (one term per line; lines starting with `#` are comments).
+            case file
+            /// A directory whose file listing becomes vocabulary
+            /// (extension dropped, `_`/`-` replaced with spaces).
+            case directory
+        }
+
+        public var id: UUID
+        public var kind: Kind
+        /// A term (for `.word`) or a filesystem path (for `.file`/`.directory`).
+        /// Paths may contain spaces and a leading `~`.
+        public var value: String
+
+        public init(id: UUID = UUID(), kind: Kind, value: String) {
+            self.id = id
+            self.kind = kind
+            self.value = value
+        }
+    }
+
+    /// The outcome of loading an ordered list of `VocabularySource`s.
+    public struct SourceLoadResult: Sendable {
+        /// Deduplicated, normalized terms ready for the speech engine.
+        public let terms: [String]
+        /// `true` if combined sources exceeded `maxTerms` and were truncated.
+        public let truncated: Bool
+        /// Unique terms contributed by each input source, aligned by index
+        /// (pre-truncation contribution).
+        public let perSourceTermCounts: [Int]
+    }
 
     /// The outcome of a vocabulary load, including per-source counts.
     public struct LoadResult: Sendable {
@@ -93,11 +144,119 @@ public enum VocabularyStore {
         )
     }
 
+    // MARK: - Source-based loading
+
+    /// Loads vocabulary from an ordered list of sources and returns a
+    /// `SourceLoadResult`. Earlier sources have higher priority when the
+    /// combined term count exceeds `maxTerms`.
+    ///
+    /// Safe to call on any thread (pure file I/O + string manipulation).
+    public static func load(
+        sources: [VocabularySource],
+        maxTerms: Int = recommendedMaxTerms
+    ) -> SourceLoadResult {
+        var seen = Set<String>()
+        var terms: [String] = []
+        var perSourceTermCounts = [Int](repeating: 0, count: sources.count)
+
+        func addTerm(_ raw: String) -> Bool {
+            let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard s.count >= 2 else { return false }
+            guard seen.insert(s.lowercased()).inserted else { return false }
+            terms.append(s)
+            return true
+        }
+
+        for (index, source) in sources.enumerated() {
+            let candidates: [String]
+            switch source.kind {
+            case .word:
+                candidates = [source.value]
+            case .file:
+                candidates = loadFromFile(source.value)
+            case .directory:
+                candidates = termsFromDirectory(source.value)
+            }
+            var count = 0
+            for candidate in candidates where addTerm(candidate) { count += 1 }
+            perSourceTermCounts[index] = count
+        }
+
+        let truncated = terms.count > maxTerms
+        if truncated {
+            terms = Array(terms.prefix(maxTerms))
+        }
+
+        return SourceLoadResult(
+            terms: terms,
+            truncated: truncated,
+            perSourceTermCounts: perSourceTermCounts
+        )
+    }
+
+    // MARK: - Source persistence
+
+    /// Decodes a JSON string (as stored in `UserDefaults`) into sources.
+    /// Returns an empty array for empty or malformed input.
+    public static func decodeSources(_ json: String) -> [VocabularySource] {
+        guard !json.isEmpty, let data = json.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([VocabularySource].self, from: data)) ?? []
+    }
+
+    /// Encodes sources to a JSON string suitable for `UserDefaults`.
+    public static func encodeSources(_ sources: [VocabularySource]) -> String {
+        guard let data = try? JSONEncoder().encode(sources),
+              let json = String(data: data, encoding: .utf8) else { return "" }
+        return json
+    }
+
+    /// Builds sources from the legacy single-value settings keys, preserving
+    /// priority order (inline words → file → folder).
+    public static func migratedSources(
+        inline: String?,
+        filePath: String?,
+        folderPath: String?
+    ) -> [VocabularySource] {
+        var result: [VocabularySource] = []
+        if let inline {
+            let words = inline
+                .components(separatedBy: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            for word in words {
+                result.append(VocabularySource(kind: .word, value: word))
+            }
+        }
+        if let filePath, !filePath.isEmpty {
+            result.append(VocabularySource(kind: .file, value: filePath))
+        }
+        if let folderPath, !folderPath.isEmpty {
+            result.append(VocabularySource(kind: .directory, value: folderPath))
+        }
+        return result
+    }
+
+    /// Resolves the configured sources from `UserDefaults`, falling back to a
+    /// one-time migration of the legacy `inline`/`filePath`/`folderPath` keys
+    /// when the new sources key has never been written.
+    public static func configuredSources(defaults: UserDefaults = .standard) -> [VocabularySource] {
+        let json = defaults.string(forKey: sourcesDefaultsKey) ?? ""
+        if !json.isEmpty {
+            return decodeSources(json)
+        }
+        return migratedSources(
+            inline: defaults.string(forKey: "alembic.vocabulary.inline"),
+            filePath: defaults.string(forKey: "alembic.vocabulary.filePath"),
+            folderPath: defaults.string(forKey: "alembic.vocabulary.folderPath")
+        )
+    }
+
     // MARK: - Private helpers
 
     private static func loadFromFile(_ path: String?) -> [String] {
         guard let path, !path.isEmpty else { return [] }
-        guard let content = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
+        let expanded = (path.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
+        guard let content = try? String(contentsOfFile: expanded, encoding: .utf8) else { return [] }
         return content
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -106,7 +265,7 @@ public enum VocabularyStore {
 
     private static func scanMarkdownFolder(_ path: String?) -> [String] {
         guard let path, !path.isEmpty else { return [] }
-        let rootURL = URL(fileURLWithPath: path)
+        let rootURL = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: rootURL,
@@ -132,6 +291,38 @@ public enum VocabularyStore {
         }
 
         return hints
+    }
+
+    /// Lists the regular files directly inside `path` and converts each filename
+    /// into a vocabulary term: the extension is dropped and `_`/`-` characters
+    /// are replaced with spaces (collapsing any resulting runs of whitespace).
+    private static func termsFromDirectory(_ path: String) -> [String] {
+        guard !path.isEmpty else { return [] }
+        let url = URL(fileURLWithPath: (path.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath)
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var terms: [String] = []
+        for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let isDirectory = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDirectory { continue }
+            let basename = entry.deletingPathExtension().lastPathComponent
+            terms.append(normalizeFilename(basename))
+        }
+        return terms
+    }
+
+    /// Replaces `_`/`-` with spaces and collapses runs of whitespace.
+    public static func normalizeFilename(_ name: String) -> String {
+        name
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .joined(separator: " ")
     }
 
     /// Expands a note basename into recognition hints.

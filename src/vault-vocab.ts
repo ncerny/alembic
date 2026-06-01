@@ -152,7 +152,7 @@ function phoneticNormalize(s: string): string {
     .replace(/gh(?=[^aeiou]|$)/g, "")    // silent gh
     .replace(/([aeiou])\1+/g, "$1")      // collapse double vowels
     .replace(/z/g, "s")
-    .replace(/y$/g, "i");                // trailing y → i (Johnny/Adli)
+    .replace(/y$/g, "i");                // trailing y → i (Johnny/Johnni)
 }
 
 /**
@@ -184,7 +184,7 @@ function levenshtein(a: string, b: string): number {
 
 /**
  * Extract consonant skeleton of a word (drops vowels).
- * Useful for catching truncated names: "Jane" → "dlz", "Johnny" → "dl"
+ * Useful for catching truncated names: "Johnson" → "jhnsn", "Jonson" → "jnsn"
  */
 function consonantSkeleton(s: string): string {
   return s.toLowerCase().replace(/[aeiou]/g, "");
@@ -275,8 +275,8 @@ export function correctTranscriptNames(
       }
 
       // Fallback: consonant skeleton match for truncated names
-      // "Johnny" skeleton "dl" vs "Jane" skeleton "dlz" — distance 1
-      // Require first letter to match to avoid false positives (e.g., "Daily" → "Jane")
+      // "Jonson" skeleton "jnsn" vs "Johnson" skeleton "jhnsn" — distance 1
+      // Require first letter to match to avoid false positives (e.g., "Jason" → "Johnson")
       if (wordSkeleton.length >= 2 && skeleton.length >= 2 &&
           wordLower[0] === original.toLowerCase()[0]) {
         const skelDist = levenshtein(wordSkeleton, skeleton);

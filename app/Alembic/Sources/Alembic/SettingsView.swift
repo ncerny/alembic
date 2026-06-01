@@ -8,62 +8,58 @@ import AlembicKit
 /// before each recording session starts, biasing on-device speech recognition
 /// toward the terms most likely to appear in your meetings.
 ///
-/// Three sources are combined in priority order (inline > file > folder). The
-/// ~500-term Apple limit is enforced by truncating lower-priority sources first.
+/// Sources are evaluated top-to-bottom; the first row has the highest priority
+/// when the combined term count exceeds the ~500-term Apple limit.
 struct SettingsView: View {
-    @AppStorage("alembic.vocabulary.inline")
-    private var inlineVocabulary = ""
-
-    @AppStorage("alembic.vocabulary.filePath")
-    private var vocabularyFilePath = ""
-
-    @AppStorage("alembic.vocabulary.folderPath")
-    private var vocabularyFolderPath = ""
-
-    @State private var previewResult: VocabularyStore.LoadResult?
+    @State private var sources: [VocabularyStore.VocabularySource]
+    @State private var previewResult: VocabularyStore.SourceLoadResult?
     @State private var isPreviewing = false
+
+    init() {
+        _sources = State(initialValue: VocabularyStore.configuredSources())
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Form {
                 Section {
-                    LabeledContent("Inline Terms") {
-                        TextEditor(text: $inlineVocabulary)
-                            .font(.body.monospaced())
-                            .frame(minHeight: 60, maxHeight: 120)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color(nsColor: .separatorColor)))
-                    }
-                    .help("Comma-separated terms (highest priority). E.g.: Dynatrace, Kubernetes, Zabbix")
-
-                    LabeledContent("Vocabulary File") {
-                        HStack {
-                            TextField("~/.config/alembic/vocabulary.txt", text: $vocabularyFilePath)
-                                .textFieldStyle(.roundedBorder)
-                            Button("Browse…") { browseForFile() }
+                    if sources.isEmpty {
+                        Text("No vocabulary sources. Use + to add a word, file, or directory.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 4)
+                    } else {
+                        VStack(spacing: 6) {
+                            ForEach($sources) { $source in
+                                sourceRow($source)
+                            }
                         }
                     }
-                    .help("Plain-text file with one term per line. Lines starting with # are ignored.")
 
-                    LabeledContent("Markdown Folder") {
-                        HStack {
-                            TextField("~/path/to/vault", text: $vocabularyFolderPath)
-                                .textFieldStyle(.roundedBorder)
-                            Button("Browse…") { browseForFolder() }
+                    HStack {
+                        Menu {
+                            Button("Word") { addWord() }
+                            Button("File…") { addFile() }
+                            Button("Directory…") { addDirectory() }
+                        } label: {
+                            Label("Add Source", systemImage: "plus")
                         }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+
+                        Spacer()
                     }
-                    .help("Folder of .md files. Basenames become hints (\"Last, First\" → \"First Last\").")
+                    .padding(.top, 2)
                 } header: {
-                    Text("Vocabulary Hints")
+                    Text("Vocabulary Sources")
                         .font(.headline)
                         .padding(.bottom, 4)
                 }
 
                 Section {
                     HStack {
-                        Button("Preview") {
-                            runPreview()
-                        }
-                        .disabled(isPreviewing)
+                        Button("Preview") { runPreview() }
+                            .disabled(isPreviewing)
 
                         if isPreviewing {
                             ProgressView().scaleEffect(0.6)
@@ -87,71 +83,123 @@ struct SettingsView: View {
 
             Divider()
 
-            Text("Hints take effect on the next recording. Priority: inline → file → folder.")
+            Text("Hints take effect on the next recording. Sources are prioritized top to bottom.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
         }
-        .frame(minWidth: 500, idealWidth: 540, minHeight: 340)
-    }
-
-    // MARK: - Helpers
-
-    private func browseForFile() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        panel.title = "Choose Vocabulary File"
-        if panel.runModal() == .OK, let url = panel.url {
-            vocabularyFilePath = url.path
+        .frame(minWidth: 500, idealWidth: 540, minHeight: 360)
+        .onChange(of: sources) { _, newValue in
+            persist(newValue)
+        }
+        .onAppear {
+            // Persist once after a legacy migration so source IDs stay stable
+            // across launches instead of being re-derived from the old keys.
+            let existing = UserDefaults.standard.string(forKey: VocabularyStore.sourcesDefaultsKey)
+            if existing == nil || existing!.isEmpty {
+                persist(sources)
+            }
         }
     }
 
-    private func browseForFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.title = "Choose Markdown Folder"
-        if panel.runModal() == .OK, let url = panel.url {
-            vocabularyFolderPath = url.path
+    // MARK: - Rows
+
+    @ViewBuilder
+    private func sourceRow(_ source: Binding<VocabularyStore.VocabularySource>) -> some View {
+        HStack(spacing: 8) {
+            Picker("", selection: source.kind) {
+                Text("Word").tag(VocabularyStore.VocabularySource.Kind.word)
+                Text("File").tag(VocabularyStore.VocabularySource.Kind.file)
+                Text("Directory").tag(VocabularyStore.VocabularySource.Kind.directory)
+            }
+            .labelsHidden()
+            .fixedSize()
+
+            switch source.wrappedValue.kind {
+            case .word:
+                TextField("Term", text: source.value)
+                    .textFieldStyle(.roundedBorder)
+            case .file:
+                TextField("~/path/to/vocabulary.txt", text: source.value)
+                    .textFieldStyle(.roundedBorder)
+                Button("Browse…") { browse(source, directories: false) }
+            case .directory:
+                TextField("~/path/to/folder", text: source.value)
+                    .textFieldStyle(.roundedBorder)
+                Button("Browse…") { browse(source, directories: true) }
+            }
+
+            Button { remove(source.wrappedValue.id) } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Remove this source")
         }
     }
+
+    // MARK: - Mutations
+
+    private func addWord() {
+        sources.append(.init(kind: .word, value: ""))
+    }
+
+    private func addFile() {
+        if let path = runOpenPanel(directories: false, title: "Choose Vocabulary File") {
+            sources.append(.init(kind: .file, value: path))
+        }
+    }
+
+    private func addDirectory() {
+        if let path = runOpenPanel(directories: true, title: "Choose Vocabulary Directory") {
+            sources.append(.init(kind: .directory, value: path))
+        }
+    }
+
+    private func remove(_ id: UUID) {
+        sources.removeAll { $0.id == id }
+    }
+
+    private func browse(_ source: Binding<VocabularyStore.VocabularySource>, directories: Bool) {
+        let title = directories ? "Choose Vocabulary Directory" : "Choose Vocabulary File"
+        if let path = runOpenPanel(directories: directories, title: title) {
+            source.wrappedValue.value = path
+        }
+    }
+
+    private func runOpenPanel(directories: Bool, title: String) -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = !directories
+        panel.canChooseDirectories = directories
+        panel.allowsMultipleSelection = false
+        panel.title = title
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
+
+    private func persist(_ value: [VocabularyStore.VocabularySource]) {
+        UserDefaults.standard.set(
+            VocabularyStore.encodeSources(value),
+            forKey: VocabularyStore.sourcesDefaultsKey
+        )
+    }
+
+    // MARK: - Preview
 
     private func runPreview() {
         isPreviewing = true
         previewResult = nil
-        let filePath = vocabularyFilePath.nilIfEmpty
-        let folderPath = vocabularyFolderPath.nilIfEmpty
-        let inlineTerms = inlineVocabulary
-            .components(separatedBy: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        let snapshot = sources
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                VocabularyStore.load(
-                    filePath: filePath,
-                    folderPath: folderPath,
-                    inlineTerms: inlineTerms
-                )
+                VocabularyStore.load(sources: snapshot)
             }.value
             previewResult = result
             isPreviewing = false
         }
     }
 
-    private func previewSummary(_ r: VocabularyStore.LoadResult) -> String {
-        var parts: [String] = []
-        if r.inlineCount > 0 { parts.append("\(r.inlineCount) inline") }
-        if r.fileCount > 0   { parts.append("\(r.fileCount) file") }
-        if r.folderCount > 0 { parts.append("\(r.folderCount) folder") }
-        let total = "→ \(r.terms.count) term\(r.terms.count == 1 ? "" : "s")"
+    private func previewSummary(_ r: VocabularyStore.SourceLoadResult) -> String {
+        let total = r.terms.count
         let suffix = r.truncated ? " (truncated to \(VocabularyStore.recommendedMaxTerms))" : ""
-        return parts.isEmpty ? "0 terms" : parts.joined(separator: " + ") + " " + total + suffix
+        return "→ \(total) term\(total == 1 ? "" : "s")" + suffix
     }
-}
-
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
