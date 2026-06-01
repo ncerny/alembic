@@ -117,14 +117,17 @@ struct SettingsView: View {
 
             switch source.wrappedValue.kind {
             case .word:
-                TextField("Term", text: source.value)
+                TextField("Term", text: source.value, prompt: Text("Term"))
+                    .labelsHidden()
                     .textFieldStyle(.roundedBorder)
             case .file:
-                TextField("Vocabulary file path", text: source.value)
+                TextField("Vocabulary file path", text: source.value, prompt: Text("Vocabulary file path"))
+                    .labelsHidden()
                     .textFieldStyle(.roundedBorder)
                 Button("Browse…") { browse(source, directories: false) }
             case .directory:
-                TextField("Folder path", text: source.value)
+                TextField("Folder path", text: source.value, prompt: Text("Folder path"))
+                    .labelsHidden()
                     .textFieldStyle(.roundedBorder)
                 Button("Browse…") { browse(source, directories: true) }
             }
