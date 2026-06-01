@@ -59,6 +59,11 @@ struct AlembicMenu: View {
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
 
+        Button("Settings…") {
+            openWindow(id: AppModel.settingsWindowID)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+
         Button("Reveal Transcript in Finder") {
             model.revealTranscript()
         }

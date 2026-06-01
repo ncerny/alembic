@@ -27,5 +27,10 @@ struct AlembicApp: App {
         Window("Live Transcript", id: AppModel.liveWindowID) {
             LiveTranscriptView(model: model)
         }
+
+        Window("Alembic Settings", id: AppModel.settingsWindowID) {
+            SettingsView()
+        }
+        .defaultSize(width: 540, height: 380)
     }
 }

@@ -1,5 +1,6 @@
 import type { App } from "obsidian";
 import { CalendarAgent } from "./calendar-agent";
+import { parseCalendarDateTime } from "./calendar-time";
 import { PeopleManager } from "./people-manager";
 import type { CalendarEvent, GraphAttendee } from "./types";
 
@@ -66,8 +67,8 @@ export class CalendarSync {
     const now = new Date();
 
     for (const event of this.events) {
-      const start = new Date(event.start.dateTime + "Z");
-      const end = new Date(event.end.dateTime + "Z");
+      const start = parseCalendarDateTime(event.start.dateTime, event.start.timeZone);
+      const end = parseCalendarDateTime(event.end.dateTime, event.end.timeZone);
 
       // Currently in this meeting
       if (now >= start && now <= end) return event;
@@ -75,7 +76,7 @@ export class CalendarSync {
 
     // Find next upcoming
     for (const event of this.events) {
-      const start = new Date(event.start.dateTime + "Z");
+      const start = parseCalendarDateTime(event.start.dateTime, event.start.timeZone);
       if (start > now) return event;
     }
 

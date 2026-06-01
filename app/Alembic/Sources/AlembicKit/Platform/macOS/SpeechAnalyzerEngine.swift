@@ -59,6 +59,7 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
     private let source: SourceTag
     private let locale: Locale
     private let clock: SessionClock
+    private let contextualStrings: [String]
     private let inputBufferCapacity: Int
 
     private var transcriber: SpeechTranscriber?
@@ -91,12 +92,14 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         source: SourceTag,
         locale: Locale,
         clock: SessionClock,
+        contextualStrings: [String] = [],
         inputBufferCapacity: Int = 256,
         sustainedDropThreshold: Int = 10
     ) {
         self.source = source
         self.locale = locale
         self.clock = clock
+        self.contextualStrings = contextualStrings
         self.inputBufferCapacity = Swift.max(1, inputBufferCapacity)
         self.backpressure = AudioInputBackpressure(sustainedDropThreshold: sustainedDropThreshold)
         (results, resultsContinuation) = AsyncStream<TranscriptEvent>.makeStream(bufferingPolicy: .unbounded)
@@ -130,6 +133,12 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
             options: SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .whileInUse)
         )
         self.analyzer = analyzer
+
+        if !contextualStrings.isEmpty {
+            let ctx = AnalysisContext()
+            ctx.contextualStrings[.general] = contextualStrings
+            try await analyzer.setContext(ctx)
+        }
 
         startConsumption()
         try await analyzer.start(inputSequence: stream)

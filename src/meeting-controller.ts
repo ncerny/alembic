@@ -1,6 +1,6 @@
 import { Notice } from "obsidian";
-import { mkdtempSync } from "fs";
-import { tmpdir } from "os";
+import { existsSync, mkdtempSync } from "fs";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
 import type MeetingNotesPlugin from "../main";
 import { AudioCapture } from "./audio-capture";
@@ -10,6 +10,11 @@ import { CopilotSDKProvider } from "./providers/copilot-sdk";
 import { NoteBuilder } from "./note-builder";
 import { getVaultVocabulary, vocabToRecognitionHints, correctTranscriptNames } from "./vault-vocab";
 import { stripHtml } from "./calendar-sync";
+import { addListener } from "./listener-utils";
+import {
+  getPluginDir as getInstalledPluginDir,
+  resolveHelperRoot,
+} from "./plugin-paths";
 import type {
   CalendarEvent,
   DependencyIssue,
@@ -53,16 +58,16 @@ export class MeetingController {
     return this.audioCapture.duration;
   }
 
-  onStateChange(listener: (state: MeetingState) => void): void {
-    this.stateListeners.push(listener);
+  onStateChange(listener: (state: MeetingState) => void): () => void {
+    return addListener(this.stateListeners, listener);
   }
 
-  onProgress(listener: (msg: string) => void): void {
-    this.progressListeners.push(listener);
+  onProgress(listener: (msg: string) => void): () => void {
+    return addListener(this.progressListeners, listener);
   }
 
-  onDurationUpdate(listener: (seconds: number) => void): void {
-    this.durationListeners.push(listener);
+  onDurationUpdate(listener: (seconds: number) => void): () => void {
+    return addListener(this.durationListeners, listener);
   }
 
   private setState(state: MeetingState): void {
@@ -303,11 +308,14 @@ export class MeetingController {
   private getPluginDir(): string {
     const adapter = this.plugin.app.vault.adapter as any;
     const basePath = adapter.getBasePath?.() || "";
-    return `${basePath}/.obsidian/plugins/alembic`;
+    return getInstalledPluginDir(basePath);
   }
 
-  /** App bundle path outside iCloud-managed Documents (Launch Services can't open apps from iCloud dirs). */
   private getHelperDir(): string {
-    return `${process.env.HOME}/Library/Application Support/alembic`;
+    return resolveHelperRoot({
+      pluginDir: this.getPluginDir(),
+      homeDir: process.env.HOME || homedir(),
+      helperExists: (helperAppPath) => existsSync(helperAppPath),
+    });
   }
 }

@@ -30,6 +30,9 @@ final class AppModel {
     /// Scene id for the live transcript `Window`, opened via `openWindow`.
     static let liveWindowID = "live-transcript"
 
+    /// Scene id for the settings `Window`, opened via `openWindow`.
+    static let settingsWindowID = "alembic-settings"
+
     /// The orchestrator the whole UI binds to. Rebuilt for each new meeting
     /// (a `MeetingSession` is single-shot: it cannot restart after `.saved`).
     private(set) var session: MeetingSession
@@ -69,11 +72,12 @@ final class AppModel {
 
     @ObservationIgnored private let assetManager = SpeechAssetManager()
     @ObservationIgnored private let localeBox = LocaleBox()
+    @ObservationIgnored private let vocabularyBox = VocabularyBox()
     @ObservationIgnored private var progressTask: Task<Void, Never>?
 
     init() {
         let initialName = "Meeting"
-        session = AppModel.makeSession(meetingName: initialName, localeBox: localeBox)
+        session = AppModel.makeSession(meetingName: initialName, localeBox: localeBox, vocabularyBox: vocabularyBox)
         meetingName = initialName
         // Read current permission status (no prompts) so the menu reflects what
         // still needs granting before the first Start.
@@ -99,7 +103,7 @@ final class AppModel {
     /// - opens a `TranscriptWriter` under `~/Documents/Alembic/`, and
     /// - anchors the session clock origin on the same monotonic host-time basis
     ///   the source uses (`HostClock.now()`), so engine/source times align.
-    private static func makeSession(meetingName: String, localeBox: LocaleBox) -> MeetingSession {
+    private static func makeSession(meetingName: String, localeBox: LocaleBox, vocabularyBox: VocabularyBox) -> MeetingSession {
         let source = ScreenCaptureKitSource()
 
         // Map CaptureSourceError -> String for the platform-neutral orchestrator.
@@ -115,7 +119,12 @@ final class AppModel {
         }
 
         let engineFactory: @Sendable (SourceTag, SessionClock) -> any TranscriptionEngine = { tag, clock in
-            SpeechAnalyzerEngine(source: tag, locale: localeBox.locale, clock: clock)
+            SpeechAnalyzerEngine(
+                source: tag,
+                locale: localeBox.locale,
+                clock: clock,
+                contextualStrings: vocabularyBox.terms
+            )
         }
 
         let makeWriter: @Sendable () throws -> TranscriptWriter = {
@@ -170,7 +179,7 @@ final class AppModel {
         startupBlocker = nil
 
         if AppModel.isTerminal(session.state) {
-            session = AppModel.makeSession(meetingName: meetingName, localeBox: localeBox)
+            session = AppModel.makeSession(meetingName: meetingName, localeBox: localeBox, vocabularyBox: vocabularyBox)
             await refreshTargets()
         }
 
@@ -198,6 +207,27 @@ final class AppModel {
 
         isPreparingModels = false
         progressTask?.cancel()
+
+        // Load vocabulary off the main actor (file I/O may be slow for large folders).
+        let vocabResult = await Task.detached(priority: .userInitiated) {
+            let filePath = UserDefaults.standard.string(forKey: "alembic.vocabulary.filePath")
+                .flatMap { $0.isEmpty ? nil : $0 }
+            let folderPath = UserDefaults.standard.string(forKey: "alembic.vocabulary.folderPath")
+                .flatMap { $0.isEmpty ? nil : $0 }
+            return VocabularyStore.load(
+                filePath: filePath,
+                folderPath: folderPath,
+                inlineTerms: (UserDefaults.standard.string(forKey: "alembic.vocabulary.inline") ?? "")
+                    .components(separatedBy: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+            )
+        }.value
+        vocabularyBox.set(vocabResult.terms)
+        print("[alembic] Vocabulary loaded: \(vocabResult.inlineCount) inline, " +
+              "\(vocabResult.fileCount) file, \(vocabResult.folderCount) folder " +
+              "= \(vocabResult.terms.count) total\(vocabResult.truncated ? " (truncated)" : "")")
+
         await session.start(target: target)
     }
 
@@ -328,4 +358,29 @@ final class LocaleBox: @unchecked Sendable {
     func set(_ newValue: Locale) {
         lock.lock(); value = newValue; lock.unlock()
     }
+}
+
+/// Thread-safe, `Sendable` holder for the session-start vocabulary terms.
+///
+/// Follows the same bridge pattern as `LocaleBox`: `AppModel.start` loads
+/// vocabulary off-actor and stores it here **before** `session.start`, so the
+/// `@Sendable` engine factory can read it synchronously when the session builds
+/// its per-source `SpeechAnalyzerEngine` instances.
+final class VocabularyBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: [String] = []
+
+    var terms: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: [String]) {
+        lock.lock(); value = newValue; lock.unlock()
+    }
+}
+
+private extension String {
+    /// Returns `nil` when the string is empty (convenience for optional paths).
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

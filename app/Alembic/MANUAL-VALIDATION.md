@@ -105,7 +105,26 @@ box only when the **Expected result** is observed.
 - [ ] **Screen-share** scenario (a participant shares their screen).
       **Expected:** meeting audio capture continues uninterrupted during share.
 
-## 8. Privacy spot-check (network egress)
+## 8. Vocabulary hints (Settings UI)
+
+- [ ] Open **Settings…** from the menu bar icon. **Expected:** the Settings window
+      appears with three inputs: Inline Terms, Vocabulary File, Markdown Folder.
+- [ ] Enter a comma-separated list in **Inline Terms** (e.g. `Dynatrace, Kubernetes`).
+      Click **Preview**. **Expected:** preview shows the correct inline count and
+      total term count with no truncation warning.
+- [ ] Use **Browse…** for **Vocabulary File** to select a plain-text file (one
+      term per line, `#` comment lines). Click **Preview**. **Expected:** file
+      terms are counted separately from inline terms.
+- [ ] Use **Browse…** for **Markdown Folder** to select a folder of `.md` notes.
+      Click **Preview**. **Expected:** basenames appear as hints; `Last, First`
+      names appear in natural order (e.g. `Jane Doe`).
+- [ ] Enter enough terms to exceed 500 total. **Expected:** the preview shows an
+      orange truncation warning indicating folder terms were dropped first.
+- [ ] Start a recording after configuring vocabulary. **Expected:** the console
+      log (`[alembic] Vocabulary loaded: …`) shows the correct counts, and
+      recognition of the hinted terms is noticeably more accurate.
+
+## 9. Privacy spot-check (network egress)
 
 - [ ] Before/after the (optional, one-time) Apple model-asset download, monitor
       network while recording. Use one of:

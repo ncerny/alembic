@@ -28,6 +28,7 @@ struct AlembicCheck {
         await checkMeetingSession(s)
         checkTimestampFormatting(s)
         checkPermissionsLogic(s)
+        checkVocabularyStore(s)
     }
 
     // MARK: - Phase 8: pure permissions / first-run UX logic (no prompts)
@@ -923,6 +924,114 @@ struct AlembicCheck {
             var count = 0
             for await _ in source.buffers { count += 1 }
             s.expectEqual(count, 0, "no chunks; stream finished after stop")
+        }
+    }
+
+    // MARK: - VocabularyStore
+
+    static func checkVocabularyStore(_ s: CheckSuite) {
+        s.check("expandName: single word") { s in
+            let hints = VocabularyStore.expandName("Kubernetes")
+            s.expectEqual(hints, ["Kubernetes"], "single word → itself only")
+        }
+
+        s.check("expandName: space-separated name") { s in
+            let hints = VocabularyStore.expandName("Jane Doe")
+            s.expect(hints.contains("Jane"), "contains first")
+            s.expect(hints.contains("Doe"), "contains last")
+            s.expect(hints.contains("Jane Doe"), "contains full phrase")
+        }
+
+        s.check("expandName: Last, First format") { s in
+            let hints = VocabularyStore.expandName("Doe, Jane")
+            s.expect(hints.contains("Doe"), "contains last")
+            s.expect(hints.contains("Jane"), "contains first")
+            s.expect(hints.contains("Jane Doe"), "contains First Last phrase")
+            s.expect(!hints.contains("Doe, Jane"), "does not include raw comma form")
+        }
+
+        s.check("load: inline terms are highest priority and never truncated") { s in
+            let inline = ["Alpha", "Beta", "Gamma"]
+            let result = VocabularyStore.load(
+                filePath: nil, folderPath: nil,
+                inlineTerms: inline, maxTerms: 2
+            )
+            s.expect(result.terms.contains("Alpha"), "inline Alpha survives truncation")
+            s.expect(result.terms.contains("Beta"), "inline Beta survives truncation")
+            s.expectEqual(result.terms.count, 2, "truncated to maxTerms=2")
+            s.expect(result.truncated, "truncated flag set")
+            s.expectEqual(result.inlineCount, 3, "inline count before truncation")
+        }
+
+        s.check("load: inline terms deduplicated case-insensitively") { s in
+            let result = VocabularyStore.load(
+                filePath: nil, folderPath: nil,
+                inlineTerms: ["Kubernetes", "kubernetes", "KUBERNETES"]
+            )
+            s.expectEqual(result.terms.count, 1, "3 case variants → 1 unique term")
+            s.expectEqual(result.inlineCount, 1, "inline count = 1")
+        }
+
+        s.check("load: min-length filter (< 2 chars dropped)") { s in
+            let result = VocabularyStore.load(
+                filePath: nil, folderPath: nil,
+                inlineTerms: ["A", "B", "OK", "Go"]
+            )
+            s.expect(!result.terms.contains("A"), "single char dropped")
+            s.expect(!result.terms.contains("B"), "single char dropped")
+            s.expect(result.terms.contains("OK"), "2-char term kept")
+            s.expect(result.terms.contains("Go"), "2-char term kept")
+        }
+
+        s.check("load: missing file returns 0 file terms") { s in
+            let result = VocabularyStore.load(
+                filePath: "/tmp/alembic-nonexistent-\(Int.random(in: 0..<1_000_000)).txt",
+                folderPath: nil,
+                inlineTerms: []
+            )
+            s.expectEqual(result.fileCount, 0, "missing file → 0 file terms")
+            s.expectEqual(result.terms.count, 0, "no terms total")
+        }
+
+        s.check("load: empty filePath treated as no file source") { s in
+            let result = VocabularyStore.load(
+                filePath: "", folderPath: nil, inlineTerms: ["OnlyInline"]
+            )
+            s.expectEqual(result.fileCount, 0, "empty path → 0 file terms")
+            s.expectEqual(result.inlineCount, 1, "inline still present")
+        }
+
+        s.check("load: plain-text file, one term per line, hash comments stripped") { s in
+            let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("alembic-vocab-check-\(Int.random(in: 0..<1_000_000)).txt")
+            defer { try? FileManager.default.removeItem(at: tmp) }
+
+            let content = """
+            # This is a comment
+            Dynatrace
+            Kubernetes
+              Zabbix  
+            # another comment
+
+            Splunk
+            """
+            try content.write(to: tmp, atomically: true, encoding: .utf8)
+            let result = VocabularyStore.load(
+                filePath: tmp.path, folderPath: nil, inlineTerms: []
+            )
+            s.expectEqual(result.fileCount, 4, "4 non-comment, non-blank lines")
+            s.expect(result.terms.contains("Dynatrace"), "Dynatrace present")
+            s.expect(result.terms.contains("Zabbix"), "Zabbix (trimmed) present")
+            s.expect(result.terms.contains("Splunk"), "Splunk present")
+        }
+
+        s.check("load: not-truncated flag when within limit") { s in
+            let result = VocabularyStore.load(
+                filePath: nil, folderPath: nil,
+                inlineTerms: ["Alpha", "Beta"],
+                maxTerms: 500
+            )
+            s.expect(!result.truncated, "not truncated when within limit")
         }
     }
 }

@@ -1,6 +1,7 @@
 import { ItemView, WorkspaceLeaf, setIcon } from "obsidian";
 import type MeetingNotesPlugin from "../main";
 import { formatDuration } from "./audio-capture";
+import { parseCalendarDateTime } from "./calendar-time";
 import { MEETING_VIEW_TYPE, type CalendarEvent, type DependencyIssue, type MeetingState } from "./types";
 
 export class MeetingView extends ItemView {
@@ -20,6 +21,10 @@ export class MeetingView extends ItemView {
   private calendarSection: HTMLElement | null = null;
   private selectedEvent: CalendarEvent | null = null;
   private unsubCalendar?: () => void;
+  private unsubState?: () => void;
+  private unsubDuration?: () => void;
+  private unsubProgress?: () => void;
+  private stopInFlight = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: MeetingNotesPlugin) {
     super(leaf);
@@ -123,13 +128,13 @@ export class MeetingView extends ItemView {
     this.enhanceBtn.addEventListener("click", () => this.onEnhance());
 
     // Wire up controller events
-    this.plugin.controller.onStateChange((state) => this.updateUI(state));
-    this.plugin.controller.onDurationUpdate((seconds) => {
+    this.unsubState = this.plugin.controller.onStateChange((state) => this.updateUI(state));
+    this.unsubDuration = this.plugin.controller.onDurationUpdate((seconds) => {
       if (this.timerEl) {
         this.timerEl.setText(formatDuration(seconds));
       }
     });
-    this.plugin.controller.onProgress((msg) => {
+    this.unsubProgress = this.plugin.controller.onProgress((msg) => {
       if (this.progressLabel) this.progressLabel.setText(msg);
     });
   }
@@ -139,9 +144,23 @@ export class MeetingView extends ItemView {
   }
 
   private async onStop(): Promise<void> {
+    if (this.stopInFlight) {
+      return;
+    }
+
+    this.stopInFlight = true;
+    if (this.stopBtn) {
+      this.stopBtn.disabled = true;
+    }
+
     const title = this.titleInput?.value || "";
     const notes = this.notesArea?.value || "";
-    await this.plugin.controller.stopAndProcess(title, notes, this.selectedEvent ?? undefined);
+    try {
+      await this.plugin.controller.stopAndProcess(title, notes, this.selectedEvent ?? undefined);
+    } finally {
+      this.stopInFlight = false;
+      this.updateUI(this.plugin.controller.state);
+    }
   }
 
   private async onEnhance(): Promise<void> {
@@ -203,7 +222,7 @@ export class MeetingView extends ItemView {
       this.recordBtn.disabled = !isIdle || this.plugin.controller.hasErrors;
     }
     if (this.stopBtn) {
-      this.stopBtn.disabled = !isRecording;
+      this.stopBtn.disabled = !isRecording || this.stopInFlight;
     }
     if (this.enhanceBtn) {
       this.enhanceBtn.disabled = isRecording || isProcessing;
@@ -303,8 +322,8 @@ export class MeetingView extends ItemView {
     label.setText("📅 Today's meetings:");
 
     for (const event of events) {
-      const startTime = new Date(event.start.dateTime + "Z");
-      const endTime = new Date(event.end.dateTime + "Z");
+      const startTime = parseCalendarDateTime(event.start.dateTime, event.start.timeZone);
+      const endTime = parseCalendarDateTime(event.end.dateTime, event.end.timeZone);
       const timeStr = `${formatTime(startTime)}–${formatTime(endTime)}`;
       const attendeeCount = event.attendees.length;
       const isTeams = !!event.onlineMeeting?.joinUrl;
@@ -332,6 +351,9 @@ export class MeetingView extends ItemView {
 
   async onClose(): Promise<void> {
     this.unsubCalendar?.();
+    this.unsubState?.();
+    this.unsubDuration?.();
+    this.unsubProgress?.();
   }
 }
 

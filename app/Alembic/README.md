@@ -108,6 +108,39 @@ targets:
    time. **Stop** to drain and save the transcript.
 7. Use **Reveal in Finder** to open the saved transcript.
 
+## Settings
+
+Open Settings from the Alembic menu bar icon → **Settings…**
+
+### Vocabulary hints
+
+Vocabulary hints bias on-device speech recognition toward terms that appear in
+your meetings — product names, team member names, project codes. They are
+injected via `AnalysisContext.contextualStrings[.general]` before each session
+starts. Apple recommends keeping the list under ~500 terms.
+
+Three sources are combined in priority order. When the total exceeds 500, lower-
+priority sources are truncated first (folder → file → inline):
+
+| Source | How to configure | Format |
+|---|---|---|
+| **Inline** | Comma-separated list in the Settings field | `Dynatrace, Kubernetes, Jane Doe` |
+| **File** | Path to a plain-text file | One term per line; lines starting with `#` are comments |
+| **Folder** | Path to a folder of Markdown files | File basenames become hints; `Last, First` names expand to `First Last` |
+
+The folder source is the same idea as the legacy Obsidian vault scan: point it at
+any folder of notes whose filenames are people or project names and they will
+automatically bias transcription.
+
+**"Last, First" name expansion:** `Doe, Jane` → `Doe`, `Jane`,
+`Jane Doe`. Date-prefixed basenames (`2026-06-01 …`) and anything under
+an `Archive/` folder are skipped automatically.
+
+Settings are stored in `UserDefaults` under:
+- `alembic.vocabulary.inline`
+- `alembic.vocabulary.filePath`
+- `alembic.vocabulary.folderPath`
+
 ## Transcript output
 
 Transcripts are written to:
@@ -191,5 +224,5 @@ gate recording:
 ## License / status
 
 Internal project. The legacy Obsidian/TypeScript plugin (`src/*.ts`, `main.ts`,
-`swift-helper/`) is intentionally retained alongside this app and is not part of
-this build.
+`swift-helper/`) lives at the repository root and is not part of this SwiftPM
+build — it is retained for historical reference only.

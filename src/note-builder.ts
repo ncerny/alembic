@@ -1,7 +1,7 @@
 import { type App, TFolder, normalizePath } from "obsidian";
-import { formatTimestamp } from "./audio-capture";
+import { formatTranscriptLines } from "./transcript-format";
 import { insertWikilinks } from "./vault-vocab";
-import type { MeetingData, MeetingSummary, TranscriptSegment } from "./types";
+import type { MeetingData } from "./types";
 
 export class NoteBuilder {
   private app: App;
@@ -116,8 +116,8 @@ export class NoteBuilder {
       parts.push("<details>");
       parts.push("<summary>Full transcript (click to expand)</summary>");
       parts.push("");
-      for (const seg of data.transcript) {
-        parts.push(`[${formatTimestamp(seg.start)}] ${link(seg.text)}`);
+      for (const line of formatTranscriptLines(data.transcript)) {
+        parts.push(link(line));
       }
       parts.push("");
       parts.push("</details>");

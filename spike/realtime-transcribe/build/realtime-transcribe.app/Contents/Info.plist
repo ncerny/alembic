@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.alembic.realtime-transcribe</string>
+    <key>CFBundleName</key>
+    <string>realtime-transcribe</string>
+    <key>CFBundleExecutable</key>
+    <string>realtime-transcribe</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>26.0</string>
+    <key>LSBackgroundOnly</key>
+    <true/>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Alembic uses on-device speech recognition to transcribe meeting audio in real time.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Alembic captures your microphone to transcribe what you say in the meeting.</string>
+</dict>
+</plist>

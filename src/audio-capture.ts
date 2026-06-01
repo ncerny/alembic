@@ -14,6 +14,7 @@ export class AudioCapture {
   private _isRecording = false;
   private outputPath = "";
   private helperPath: string;
+  private stopPromise: Promise<string> | null = null;
 
   constructor(pluginDir: string) {
     this.helperPath = join(pluginDir, "audio-capture.app", "Contents", "MacOS", "audio-capture");
@@ -124,32 +125,62 @@ export class AudioCapture {
     });
   }
 
-  async stop(): Promise<string> {
+  stop(): Promise<string> {
+    if (this.stopPromise) {
+      return this.stopPromise;
+    }
+
     if (!this._isRecording || !this.captureProcess) {
       throw new Error("No active recording");
     }
 
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.captureProcess?.kill("SIGKILL");
-        reject(new Error("audio-capture did not stop gracefully"));
+    const captureProcess = this.captureProcess;
+
+    this.stopPromise = new Promise((resolve, reject) => {
+      let settled = false;
+      let timeout: NodeJS.Timeout | null = null;
+
+      const finish = (complete: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeout) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
+        captureProcess.stdout?.off("data", onData);
+        this.stopPromise = null;
+        complete();
+      };
+
+      const onData = (data: Buffer) => {
+        if (data.toString().trim() === "STOPPED") {
+          finish(() => {
+            this.cleanup();
+            if (!existsSync(this.outputPath)) {
+              reject(new Error("Recording finished but no audio file was created. Check Screen Recording permission in System Settings."));
+              return;
+            }
+            resolve(this.outputPath);
+          });
+        }
+      };
+
+      timeout = setTimeout(() => {
+        finish(() => {
+          captureProcess.kill("SIGKILL");
+          reject(new Error("audio-capture did not stop gracefully"));
+        });
       }, 5000);
 
-      this.captureProcess!.stdout?.on("data", (data: Buffer) => {
-        if (data.toString().trim() === "STOPPED") {
-          clearTimeout(timeout);
-          this.cleanup();
-          if (!existsSync(this.outputPath)) {
-            reject(new Error("Recording finished but no audio file was created. Check Screen Recording permission in System Settings."));
-            return;
-          }
-          resolve(this.outputPath);
-        }
-      });
+      captureProcess.stdout?.on("data", onData);
 
       // Send SIGINT to stop capture gracefully
-      this.captureProcess!.kill("SIGINT");
+      captureProcess.kill("SIGINT");
     });
+
+    return this.stopPromise;
   }
 
   private cleanup(): void {
@@ -159,6 +190,7 @@ export class AudioCapture {
       this.timerInterval = null;
     }
     this.captureProcess = null;
+    this.stopPromise = null;
   }
 }
 

@@ -1,264 +1,88 @@
 # Alembic
 
-Distill meetings into knowledge. Capture audio directly from Microsoft Teams (or any app), transcribe locally with Apple's on-device Speech Recognition, and generate AI-powered summaries using GitHub Copilot — all without leaving Obsidian.
+Alembic is a **macOS menu-bar app** that produces real-time, timestamped meeting
+transcripts entirely on-device. It captures two audio streams — your microphone
+("you") and a meeting app's audio ("them") — runs both through Apple's on-device
+speech recognition (macOS 26 `SpeechAnalyzer`), and writes a crash-safe JSONL
+transcript to disk as the meeting happens.
 
-## How It Works
+**No audio and no transcript data ever leaves the machine.**
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Teams Call   │────▶│  Capture     │────▶│  On-Device   │────▶│  Copilot     │
-│  (any app)   │     │  Audio       │     │  Transcribe  │     │  Summarize   │
-└──────────────┘     └──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-                            │              Apple SFSpeech-            │
-                    macOS ScreenCaptureKit  Recognizer         GitHub Copilot SDK
-                    No bot · No virtual    + vault vocabulary  Your existing license
-                    device                   hints                    │
-                            │                                         │
-                            ▼                                         ▼
-                    ┌─────────────────────────────────────────────────────────┐
-                    │                  Obsidian Vault                         │
-                    │                                                         │
-                    │  📄 2026-04-21 Sprint Planning.md                       │
-                    │  ├── Summary, Key Decisions, Action Items               │
-                    │  ├── [[Person]] wikilinks, tags, frontmatter            │
-                    │  ├── Your notes from during the meeting                 │
-                    │  └── Full transcript (collapsible)                      │
-                    └─────────────────────────────────────────────────────────┘
+┌──────────────┐    ┌────────────────────────────────┐    ┌─────────────────────┐
+│  Teams Call  │───▶│  ScreenCaptureKit ("them")      │    │                     │
+│  (any app)   │    │  + AVAudioEngine mic ("you")     │───▶│  macOS 26           │
+└──────────────┘    └────────────────────────────────┘    │  SpeechAnalyzer     │
+                                                           │  (on-device)        │
+                                                           └──────────┬──────────┘
+                                                                      │
+                                                                      ▼
+                                                       ~/Documents/Alembic/
+                                                       2026-06-01_1430-meeting.jsonl
+                                                       2026-06-01_1430-meeting.md
 ```
 
-**Key features:**
+## Requirements
 
-- 🎙 **No bot, no virtual audio device** — uses macOS ScreenCaptureKit to capture audio directly from Teams, Zoom, or any app
-- 🔒 **Privacy-first** — audio is transcribed locally with Apple's on-device Speech Recognition; only text is sent to the LLM
-- 🧠 **Vault-aware vocabulary** — automatically scans your vault for people, technology, and project names to improve transcription accuracy and auto-link `[[wikilinks]]`
-- ✍️ **Human-AI hybrid** — jot notes during the meeting to guide what the AI focuses on
-- 🔗 **Obsidian-native** — creates linked notes with frontmatter, `[[wikilinks]]`, action items, and tags
+| Requirement | Notes |
+|---|---|
+| **macOS 26** or later | `SpeechAnalyzer` / `SpeechTranscriber` and ScreenCaptureKit per-app audio |
+| **Xcode Command Line Tools** | `xcode-select --install` — Xcode.app is not required |
 
----
-
-## Prerequisites
-
-| Requirement                        | How to install                                                     |
-| ---------------------------------- | ------------------------------------------------------------------ |
-| **macOS 13+** (Ventura or later)   | Required for ScreenCaptureKit                                      |
-| **Xcode Command Line Tools**       | `xcode-select --install`                                           |
-| **Speech Recognition permission**  | macOS prompts on first use                                         |
-| **GitHub Copilot CLI**             | `gh extension install github/gh-copilot`                           |
-| **GitHub Copilot license**         | [github.com/features/copilot](https://github.com/features/copilot) |
-
-## Installation
-
-### 1. Clone the repository
+## Quick start
 
 ```bash
-git clone https://github.com/ncerny/alembic.git
-cd alembic
+cd app/Alembic
+bash build.sh --make-cert   # once: create a stable signing cert (keeps permissions across rebuilds)
+bash build.sh --run         # build, sign, verify, launch
 ```
 
-### 2. Install dependencies and build
+See [`app/Alembic/README.md`](app/Alembic/README.md) for full build, signing,
+test, settings, and transcript format documentation.
 
-```bash
-npm install
-npm run build
-```
+## Features
 
-### 3. Build the audio capture helper
+- 🎙 **No bot, no virtual audio device** — ScreenCaptureKit captures per-app audio directly; AVAudioEngine captures the microphone
+- 🔒 **Fully on-device** — Apple's `SpeechAnalyzer` runs locally; nothing is transmitted during a meeting
+- 🏷 **Vocabulary hints** — bias recognition toward your domain's names via Settings (inline terms, a plain-text file, or a folder of Markdown notes)
+- 📄 **Crash-safe output** — each segment is flushed to disk immediately; a crash mid-meeting leaves a fully parseable transcript
+- 🧾 **Two formats** — canonical `.jsonl` (one `FinalizedSegmentDTO` per line) and a human-readable `.md` side-car
 
-```bash
-cd swift-helper
-bash build.sh    # → build/audio-capture.app
-cd ..
-```
-
-This compiles the Swift helper that captures per-app audio using macOS ScreenCaptureKit and transcribes locally with Apple's on-device SFSpeechRecognizer.
-
-### 4. Install into Obsidian
-
-Copy the plugin files to your vault's plugin directory:
-
-```bash
-VAULT_PATH="$HOME/path-to-your-vault"
-PLUGIN_DIR="$VAULT_PATH/.obsidian/plugins/alembic"
-
-mkdir -p "$PLUGIN_DIR"
-cp main.js manifest.json styles.css "$PLUGIN_DIR/"
-cp -R build/audio-capture.app "$PLUGIN_DIR/"
-```
-
-### 5. Enable the plugin
-
-1. Open Obsidian → Settings → Community Plugins
-2. Turn off **Restricted Mode** if prompted
-3. Find **Alembic** in the list and enable it
-
-### 6. Grant permissions
-
-On first use, macOS will prompt for **Screen Recording** and **Speech Recognition** permissions.
-
-> System Settings → Privacy & Security → Screen Recording → Enable **Obsidian**
-> System Settings → Privacy & Security → Speech Recognition → Enable **audio-capture**
-
----
-
-## Usage
-
-### Recording a meeting
-
-1. **Open the meeting panel** — click the 🎙 microphone icon in the left ribbon, or use the command palette: `Alembic: Open meeting panel`
-2. **Start your Teams/Zoom call** as normal
-3. **Click Record** — the plugin captures audio from the target app (default: Microsoft Teams)
-4. **Take notes** — jot down key points in the notes area during the meeting. These guide what the AI focuses on in the summary.
-5. **Click Stop** — recording ends and the plugin automatically:
-   - Transcribes the audio locally with Apple's on-device Speech Recognition
-   - Sends the transcript + your notes to GitHub Copilot for summarization
-   - Creates a structured meeting note in your vault
-
-### Generated meeting note
-
-The plugin creates a note like `Meetings/2026-04-21 Sprint Planning.md`:
-
-```markdown
----
-type: meeting
-date: 2026-04-21
-title: 'Sprint Planning - Q2 Goals'
-attendees:
-  - '[[Jane Doe]]'
-  - '[[Bob Smith]]'
-tags: [meeting, sprint-planning, q2-goals]
-duration: 45min
----
-
-# Sprint Planning - Q2 Goals
-
-## Summary
-
-The team discussed Q2 priorities and agreed to focus on...
-
-## Key Decisions
-
-- Prioritize the API redesign over the dashboard overhaul
-- Hire two additional engineers by end of May
-
-## Action Items
-
-- [ ] [[Jane Doe]]: Draft Q2 roadmap (due: 2026-04-28)
-- [ ] [[Bob Smith]]: Review budget allocation (due: 2026-04-25)
-
-## My Notes
-
-Your notes from during the meeting appear here...
-
-## Transcript
-
-<details>
-<summary>Full transcript (click to expand)</summary>
-
-[00:00] So let's get started with the sprint planning...
-[00:15] I think we should focus on the API first...
-
-</details>
-```
-
-### Command palette
-
-| Command                             | Description                              |
-| ----------------------------------- | ---------------------------------------- |
-| `Open meeting panel`                | Open the sidebar meeting view            |
-| `Start meeting recording`           | Begin capturing audio                    |
-| `Stop recording and generate notes` | Stop, transcribe, summarize, create note |
-
----
-
-## Configuration
-
-Open Settings → Alembic:
-
-| Setting                    | Description                                                  | Default           |
-| -------------------------- | ------------------------------------------------------------ | ----------------- |
-| **Target application**     | App to capture audio from                                    | `Microsoft Teams` |
-| **Output folder**          | Where meeting notes are created                              | `Meetings`        |
-| **Extra vocabulary hints** | Additional terms for speech recognition (comma-separated)    | (empty)           |
-
-All vault note names are automatically included as vocabulary hints. Notes under Archive folders and date-prefixed notes are excluded.
-
----
-
-## Architecture
+## What it produces
 
 ```
-alembic/
-├── main.ts                      # Plugin entry point
-├── src/
-│   ├── types.ts                 # Shared types & interfaces
-│   ├── settings.ts              # Plugin settings tab
-│   ├── audio-capture.ts         # Spawns Swift helper for audio capture
-│   ├── transcriber.ts           # SFSpeechRecognizer integration via Swift helper
-│   ├── vault-vocab.ts           # Vault vocabulary scanning & auto-wikilinks
-│   ├── summarizer.ts            # LLM provider interface
-│   ├── providers/
-│   │   └── copilot-sdk.ts       # GitHub Copilot SDK provider
-│   ├── prompts.ts               # Summarization prompt templates
-│   ├── note-builder.ts          # Meeting note markdown generation
-│   ├── meeting-controller.ts    # Orchestrator state machine
-│   └── meeting-view.ts          # Sidebar UI panel
-├── swift-helper/
-│   ├── AudioCapture.swift       # macOS ScreenCaptureKit audio capture + on-device SFSpeechRecognizer transcription
-│   └── build.sh                 # Build script for Swift helper
-├── styles.css                   # UI styles
-└── manifest.json                # Obsidian plugin manifest
+~/Documents/Alembic/
+  2026-06-01_1430-Sprint_Planning.jsonl   ← canonical (one JSON object per line)
+  2026-06-01_1430-Sprint_Planning.md      ← [hh:mm:ss] source: text
 ```
 
-### Data flow
+Each JSONL line carries `schemaVersion`, `start`, `end`, `source` (`you`/`them`),
+and `text`. See [`app/Alembic/README.md`](app/Alembic/README.md#transcript-output)
+for the full schema.
 
-1. **Audio capture** — Swift helper uses ScreenCaptureKit to capture app audio + AVAudioEngine for mic → mixes and writes 48kHz mono WAV
-2. **Transcription** — Apple's on-device SFSpeechRecognizer processes the WAV file locally with vault-derived vocabulary hints → produces timestamped transcript segments
-3. **Summarization** — GitHub Copilot SDK merges transcript + user notes → returns structured JSON summary
-4. **Note creation** — Note builder generates markdown with YAML frontmatter, auto-generated wikilinks from vault names, action items → saves to vault
+## Repository layout
 
-### Privacy model
+```
+app/Alembic/          ← active project (SwiftPM, macOS 26 menu-bar app)
+  Sources/
+    AlembicKit/       ← core library: models, session orchestration, transcript writer,
+    │                   platform-agnostic contracts + macOS adapters under Platform/macOS/
+    Alembic/          ← thin SwiftUI menu-bar shell (AppModel, menus, views, Settings)
+    AlembicCheck/     ← authoritative test runner  →  swift run AlembicCheck
+  build.sh            ← canonical build / sign / verify entry point
+  README.md           ← full technical documentation
 
-| Data            | Where it goes                                       |
-| --------------- | --------------------------------------------------- |
-| Audio           | Stays on your machine. Deleted after transcription. |
-| Transcript text | Sent to GitHub Copilot LLM for summarization        |
-| Meeting notes   | Stored in your Obsidian vault (local files)         |
-
-Transcription is fully on-device — no audio is sent to Apple or any other service.
-
----
-
-## Development
-
-### Dev mode (watch for changes)
-
-```bash
-npm run dev
+src/                  ← legacy TypeScript Obsidian plugin (not actively maintained)
+swift-helper/         ← legacy Swift audio capture helper for the Obsidian plugin
+docs/plans/           ← historical design documents from the Obsidian plugin era
 ```
 
-### Production build
+## Privacy
 
-```bash
-npm run build
-```
-
-### Rebuild Swift helper
-
-```bash
-cd swift-helper && bash build.sh
-```
-
----
-
-## Roadmap
-
-- [ ] Windows support (WASAPI audio capture)
-- [ ] Calendar integration (MS Graph API — auto-create notes from calendar events)
-- [ ] Pull post-meeting Teams transcripts (speaker-attributed via Graph API)
-- [ ] M365 Copilot Meeting Insights integration
-- [ ] Audio chunking for meetings longer than 1 hour
-- [ ] Dataview integration & meeting analytics
-- [ ] Community plugin submission
+The Swift sources contain no networking code — no `URLSession`, `URLRequest`, or
+sockets. The only network activity is a one-time Apple speech model-asset
+download; no audio or transcript text is ever transmitted. Static-audit command
+and manual validation checklist: [`app/Alembic/MANUAL-VALIDATION.md`](app/Alembic/MANUAL-VALIDATION.md).
 
 ## License
 
