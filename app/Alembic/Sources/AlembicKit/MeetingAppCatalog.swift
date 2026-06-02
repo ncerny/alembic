@@ -177,39 +177,85 @@ public enum MeetingAppCatalog {
 
     // MARK: - In-call detection
 
-    /// Returns the first known meeting app currently in a call, given a list
-    /// of audio process snapshots, or `nil` when no active meeting is detected.
+    /// Returns the highest-confidence in-call `MeetingAppMatch`, or `nil` when
+    /// no active meeting is detected.
     ///
     /// **Caller responsibility:** the `processStates` array must already
     /// exclude Alembic's own PID.
     ///
-    /// Rules per app (applied in catalog order — first match wins):
-    /// - `requiresTitleConfirmation: true` → **skipped entirely** (needs
-    ///   Phase 7 `WindowTitleProbe` confirmation).
+    /// Rules per app per prefix:
+    /// - `requiresTitleConfirmation: true` → skipped unless `confirmedTitles`
+    ///   contains an overlapping `titleHints` substring.
     /// - `requiresOutput: true` → at least one matching process must have
     ///   `isRunningOutput == true` (Zoom mic-preview guard).
-    /// - Default OR gate → `isRunningInput || isRunningOutput` on any
-    ///   matching process.
-    public static func isInCall(processStates: [AudioProcessState]) -> MeetingApp? {
+    /// - Default OR gate → `isRunningInput || isRunningOutput`.
+    ///
+    /// **Conflict resolution** (multiple apps in-call simultaneously):
+    /// - Single match → return it.
+    /// - Multiple matches → prefer the one with `isRunningOutput`; if still
+    ///   tied, return `nil` (do not guess).
+    ///
+    /// The `canonicalBundlePrefix` of the returned `MeetingAppMatch` is always
+    /// a prefix from the matched app's own `bundlePrefixes` list and is
+    /// suitable for resolving to a `CaptureTarget` via ScreenCaptureKit.
+    public static func detectInCall(
+        processStates: [AudioProcessState],
+        confirmedTitles: Set<String> = []
+    ) -> MeetingAppMatch? {
+        struct Candidate {
+            let app: MeetingApp
+            let canonicalBundlePrefix: String
+            let hasOutput: Bool
+        }
+
+        var candidates: [Candidate] = []
+
         for app in apps {
-            guard !app.requiresTitleConfirmation else { continue }
-            let relevant = processStates.filter { state in
-                let id = state.bundleID.lowercased()
-                return app.bundlePrefixes.contains { prefix in
-                    let p = prefix.lowercased()
+            if app.requiresTitleConfirmation {
+                let confirmed = app.titleHints.contains { hint in
+                    confirmedTitles.contains { $0.contains(hint) }
+                }
+                guard confirmed else { continue }
+            }
+            for prefix in app.bundlePrefixes {
+                let p = prefix.lowercased()
+                let relevant = processStates.filter { state in
+                    let id = state.bundleID.lowercased()
                     return id == p || id.hasPrefix(p + ".")
                 }
+                guard !relevant.isEmpty else { continue }
+                let hasOutput = relevant.contains { $0.isRunningOutput }
+                let inCall: Bool
+                if app.requiresOutput {
+                    inCall = hasOutput
+                } else {
+                    inCall = relevant.contains { $0.isRunningInput || $0.isRunningOutput }
+                }
+                if inCall {
+                    candidates.append(Candidate(app: app, canonicalBundlePrefix: prefix, hasOutput: hasOutput))
+                    break  // one match per app is sufficient
+                }
             }
-            guard !relevant.isEmpty else { continue }
-            let inCall: Bool
-            if app.requiresOutput {
-                inCall = relevant.contains { $0.isRunningOutput }
-            } else {
-                inCall = relevant.contains { $0.isRunningInput || $0.isRunningOutput }
-            }
-            if inCall { return app }
         }
-        return nil
+
+        switch candidates.count {
+        case 0:
+            return nil
+        case 1:
+            return MeetingAppMatch(app: candidates[0].app, canonicalBundlePrefix: candidates[0].canonicalBundlePrefix)
+        default:
+            let withOutput = candidates.filter { $0.hasOutput }
+            guard withOutput.count == 1 else { return nil }
+            return MeetingAppMatch(app: withOutput[0].app, canonicalBundlePrefix: withOutput[0].canonicalBundlePrefix)
+        }
+    }
+
+    /// Returns the first known meeting app currently in a call, or `nil`.
+    ///
+    /// Convenience wrapper around `detectInCall(processStates:confirmedTitles:)`
+    /// for callers that only need the `MeetingApp` (not the canonical prefix).
+    public static func isInCall(processStates: [AudioProcessState]) -> MeetingApp? {
+        detectInCall(processStates: processStates)?.app
     }
 
     // MARK: - ScreenCaptureKit compatibility shim

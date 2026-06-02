@@ -59,6 +59,11 @@ final class AppModel {
     /// and onboarding UI bind to it to guide the user through the three grants.
     let permissions = PermissionsModel()
 
+    /// `true` when Alembic should automatically start and stop recording whenever
+    /// a known meeting app begins or ends a call.
+    private(set) var autoStartEnabled: Bool =
+        UserDefaults.standard.bool(forKey: "alembic.autostart.enabled")
+
     /// The most recent reason a start was blocked or setup failed, mapped to a
     /// clear, actionable ``PermissionGuidance``. `nil` when there's nothing to
     /// surface. Never left as a silent no-op.
@@ -75,6 +80,16 @@ final class AppModel {
     @ObservationIgnored private let vocabularyBox = VocabularyBox()
     @ObservationIgnored private var progressTask: Task<Void, Never>?
 
+    // MARK: Auto-start detector (not observed)
+
+    @ObservationIgnored private var detector: MeetingDetector?
+    @ObservationIgnored private var detectorTask: Task<Void, Never>?
+    @ObservationIgnored private var consumerTask: Task<Void, Never>?
+    /// Non-nil when the current session was started automatically. Used to guard
+    /// against stopping a user-initiated session and to allow auto-stop when the
+    /// detected call ends.
+    @ObservationIgnored private var autoStartedTarget: CaptureTarget?
+
     init() {
         let initialName = "Meeting"
         session = AppModel.makeSession(meetingName: initialName, localeBox: localeBox, vocabularyBox: vocabularyBox)
@@ -86,6 +101,7 @@ final class AppModel {
         // Screen Recording permission surfaces as `session.state == .error`,
         // recoverable via the menu's "Refresh Targets" action (Phase 8 polish).
         Task { await refreshTargets() }
+        if autoStartEnabled { startDetector() }
     }
 
     // MARK: - Composition root
@@ -239,6 +255,7 @@ final class AppModel {
 
     /// Stops the active session and drains all pipelines (writer closes last).
     func stop() async {
+        autoStartedTarget = nil
         await session.stop()
     }
 
@@ -246,6 +263,85 @@ final class AppModel {
     func revealTranscript() {
         guard let url = session.outputURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    // MARK: - Auto-start
+
+    /// Enables or disables automatic meeting detection, persisting the preference.
+    func setAutoStartEnabled(_ enabled: Bool) {
+        autoStartEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "alembic.autostart.enabled")
+        if enabled { startDetector() } else { stopDetector() }
+    }
+
+    private func startDetector() {
+        guard detector == nil else { return }
+        let audioMonitor = AudioProcessMonitor()
+        let det = MeetingDetector(
+            snapshotProvider: { audioMonitor.snapshot() },
+            titleProbe: { states in
+                let confirmApps = MeetingAppCatalog.apps.filter { $0.requiresTitleConfirmation }
+                guard !confirmApps.isEmpty else { return [] }
+                return WindowTitleProbe.presentHints(for: confirmApps, processStates: states)
+            }
+        )
+        detector = det
+
+        let deviceMonitor = DeviceActivityMonitor()
+        let (wakeUps, wakeUpsCont) = AsyncStream<Bool>.makeStream()
+
+        detectorTask = Task.detached {
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await det.run(wakeUps: wakeUps) }
+                group.addTask {
+                    for await active in deviceMonitor.stream {
+                        guard !Task.isCancelled else { break }
+                        wakeUpsCont.yield(active)
+                    }
+                    wakeUpsCont.finish()
+                }
+            }
+        }
+
+        consumerTask = Task { @MainActor [weak self] in
+            for await detection in det.detections {
+                await self?.handleDetection(detection)
+            }
+        }
+    }
+
+    private func stopDetector() {
+        detectorTask?.cancel()
+        consumerTask?.cancel()
+        detectorTask = nil
+        consumerTask = nil
+        detector = nil
+    }
+
+    @MainActor private func handleDetection(_ detection: Detection?) async {
+        if let d = detection {
+            // Don't interrupt any active session (user-initiated or auto-started).
+            switch session.state {
+            case .recording, .finalizing: return
+            default: break
+            }
+            guard !isPreparingModels else { return }
+
+            let prefix = d.canonicalBundlePrefix.lowercased()
+            let target = session.availableTargets.first(where: { t in
+                let id = t.id.lowercased()
+                return id == prefix || id.hasPrefix(prefix + ".")
+            })
+            guard let target else { return }
+            selectedTarget = target
+            autoStartedTarget = target
+            await start()
+        } else {
+            // Detection ended — only auto-stop if this session was auto-started.
+            guard autoStartedTarget != nil else { return }
+            autoStartedTarget = nil
+            await stop()
+        }
     }
 
     /// Relaunches the app, used to recover from the Screen Recording
