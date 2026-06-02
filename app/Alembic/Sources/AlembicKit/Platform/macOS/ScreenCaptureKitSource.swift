@@ -284,10 +284,9 @@ public actor ScreenCaptureKitSource: AudioSource {
     /// processes (new Teams, classic, helper/renderer), and browser-based Teams
     /// shows up under the browser's bundle id — so the picker always lists *all*
     /// apps; this is only a convenience for surfacing likely candidates.
-    public static let teamsBundleIDHints: [String] = [
-        "com.microsoft.teams",   // classic Teams
-        "com.microsoft.teams2",  // new Teams
-    ]
+    ///
+    /// Delegates to `MeetingAppCatalog` as the single source of truth.
+    public static var teamsBundleIDHints: [String] { MeetingAppCatalog.teamsBundleIDHints }
 
     /// Heuristic "is this probably Teams?" used to highlight likely targets in a
     /// picker. Deliberately permissive (covers classic/new/browser tab titles).
