@@ -11,11 +11,14 @@ import AlembicKit
 /// Sources are evaluated top-to-bottom; the first row has the highest priority
 /// when the combined term count exceeds the ~500-term Apple limit.
 struct SettingsView: View {
+    private let model: AppModel
     @State private var sources: [VocabularyStore.VocabularySource]
     @State private var previewResult: VocabularyStore.SourceLoadResult?
     @State private var isPreviewing = false
+    @AppStorage("alembic.autostart.enabled") private var autoStartEnabled = false
 
-    init() {
+    init(model: AppModel) {
+        self.model = model
         _sources = State(initialValue: VocabularyStore.configuredSources())
     }
 
@@ -75,6 +78,17 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("Test Sources")
+                        .font(.headline)
+                        .padding(.bottom, 4)
+                }
+
+                Section {
+                    Toggle("Auto-start recording when a meeting is detected", isOn: $autoStartEnabled)
+                        .onChange(of: autoStartEnabled) { _, newValue in
+                            model.setAutoStartEnabled(newValue)
+                        }
+                } header: {
+                    Text("Automation")
                         .font(.headline)
                         .padding(.bottom, 4)
                 }

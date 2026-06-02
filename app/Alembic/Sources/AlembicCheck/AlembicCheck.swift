@@ -31,6 +31,8 @@ struct AlembicCheck {
         checkVocabularyStore(s)
         checkMeetingAppCatalog(s)
         checkMeetingDetectionPolicy(s)
+        checkDetectInCall(s)
+        checkMeetingDetector(s)
         checkFoundationOnlyTopLevelAudit(s)
     }
 
@@ -1394,6 +1396,184 @@ struct AlembicCheck {
             _ = policy.processSample(isInCall: true, now: 20)  // confirming
             s.expectEqual(policy.processSample(isInCall: true, now: 24), .active,
                           "second cycle active at t=24")
+        }
+    }
+
+    // MARK: - Phase 4 (detectInCall): conflict resolution + title confirmation
+
+    /// Tests for `MeetingAppCatalog.detectInCall` — the cases that go beyond what
+    /// the existing `isInCall` / `match` checks already cover.
+    static func checkDetectInCall(_ s: CheckSuite) {
+
+        func state(_ bundleID: String, input: Bool = false, output: Bool = false) -> AudioProcessState {
+            AudioProcessState(pid: 1, bundleID: bundleID, isRunningInput: input, isRunningOutput: output)
+        }
+
+        // --- Multi-app conflict: output-active wins ---
+        s.check("detectInCall conflict: output-active app wins over input-only app") { s in
+            let states = [
+                state("com.microsoft.teams2", input: true, output: false),  // Teams: input only
+                state("com.tinyspeck.slackmacgap", input: true, output: true),  // Slack: both
+            ]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match?.app.displayName == "Slack", "Slack (has output) wins over Teams (input-only)")
+        }
+
+        // --- Multi-app conflict: tie (both have output) → nil ---
+        s.check("detectInCall conflict: tied output → nil (do not guess)") { s in
+            let states = [
+                state("com.microsoft.teams2", input: true, output: true),
+                state("com.tinyspeck.slackmacgap", input: true, output: true),
+            ]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match == nil, "tied output → no detection to avoid wrong auto-start")
+        }
+
+        // --- requiresTitleConfirmation unlocked by matching hint ---
+        s.check("detectInCall: requiresTitleConfirmation unlocked when title hint present") { s in
+            let states = [state("com.google.Chrome.helper", input: true, output: true)]
+            let confirmed: Set<String> = ["Meet – Google Meet"]
+            let match = MeetingAppCatalog.detectInCall(processStates: states, confirmedTitles: confirmed)
+            s.expect(match != nil, "Chrome helper + 'Meet –' title hint → detection unlocked")
+            s.expect(match?.app.displayName == "Google Meet (browser)", "matched Google Meet browser entry")
+        }
+
+        // --- requiresTitleConfirmation locked without hint ---
+        s.check("detectInCall: requiresTitleConfirmation blocks detection without matching title") { s in
+            let states = [state("com.google.Chrome.helper", input: true, output: true)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match == nil, "Chrome helper alone (no title) → no detection")
+        }
+
+        // --- requiresOutput guard: Zoom with input only → no detection ---
+        s.check("detectInCall: requiresOutput blocks Zoom input-only (Settings audio preview)") { s in
+            let states = [state("us.zoom.xos", input: true, output: false)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match == nil, "Zoom input-only → no detection (mic preview guard)")
+        }
+
+        // --- requiresOutput guard: Zoom with output → detection ---
+        s.check("detectInCall: requiresOutput allows Zoom when output is active") { s in
+            let states = [state("us.zoom.xos", input: true, output: true)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match?.app.displayName == "Zoom", "Zoom with output → detected")
+        }
+
+        // --- Helper / renderer bundle IDs resolve to canonical parent prefix ---
+        s.check("detectInCall: Teams helper bundle resolves to canonical parent prefix") { s in
+            let states = [state("com.microsoft.teams2.modulehost", input: true, output: false)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match?.canonicalBundlePrefix == "com.microsoft.teams2",
+                     "teams2.modulehost maps to com.microsoft.teams2")
+        }
+    }
+
+    // MARK: - Phase 4 (MeetingDetector): synchronous tick-based integration
+
+    /// Tests `MeetingDetector.tick()` directly (synchronous, no async needed).
+    ///
+    /// Uses zero-length debounces so state transitions are immediate:
+    /// - idle → confirming on the first in-call tick
+    /// - confirming → active on the second in-call tick (elapsed ≥ 0)
+    /// - active → ending on first no-call tick
+    /// - ending → idle on second no-call tick (elapsed ≥ 0)
+    static func checkMeetingDetector(_ s: CheckSuite) {
+
+        func teams(output: Bool = false) -> [AudioProcessState] {
+            [AudioProcessState(pid: 200, bundleID: "com.microsoft.teams2",
+                               isRunningInput: true, isRunningOutput: output)]
+        }
+
+        // --- 1. Full idle → active → idle cycle ---
+        s.check("MeetingDetector tick: full idle→active→idle cycle with zero debounce") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+
+            // tick 1: idle → confirming (no emission)
+            let r1 = det.tick(snapshot: teams(), now: 0)
+            s.expect(r1 == nil, "idle→confirming: no change emitted")
+
+            // tick 2: confirming → active (Detection emitted)
+            let r2 = det.tick(snapshot: teams(), now: 0)
+            guard let change2 = r2 else { s.expect(false, "active: expected change emitted"); return }
+            guard let detection = change2 else { s.expect(false, "active: expected non-nil Detection"); return }
+            s.expectEqual(detection.app.displayName, "Microsoft Teams", "detected Teams")
+            s.expectEqual(detection.canonicalBundlePrefix, "com.microsoft.teams2", "canonical prefix")
+            s.expect(!detection.hasOutput, "input-only → hasOutput false")
+
+            // tick 3: still active → no change
+            let r3 = det.tick(snapshot: teams(), now: 1)
+            s.expect(r3 == nil, "still active: no duplicate emission")
+
+            // tick 4: active → ending (no emission yet)
+            let r4 = det.tick(snapshot: [], now: 2)
+            s.expect(r4 == nil, "ending: no change until end-debounce elapses")
+
+            // tick 5: ending → idle (nil emitted = call ended)
+            let r5 = det.tick(snapshot: [], now: 2)
+            guard let change5 = r5 else { s.expect(false, "idle: expected change emitted"); return }
+            s.expect(change5 == nil, "nil emitted = call ended")
+        }
+
+        // --- 2. hasOutput reflects process state ---
+        s.check("MeetingDetector tick: hasOutput true when output process present") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(output: true), now: 0)  // confirming
+            let r = det.tick(snapshot: teams(output: true), now: 0)  // active
+            guard let d = r?.flatMap({ $0 }) else { s.expect(false, "expected Detection"); return }
+            s.expect(d.hasOutput, "output process present → hasOutput true")
+        }
+
+        // --- 3. Multi-app tie → no detection ---
+        s.check("MeetingDetector tick: multi-app tied output → no detection") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            let tied: [AudioProcessState] = [
+                AudioProcessState(pid: 1, bundleID: "com.microsoft.teams2",
+                                  isRunningInput: true, isRunningOutput: true),
+                AudioProcessState(pid: 2, bundleID: "com.tinyspeck.slackmacgap",
+                                  isRunningInput: true, isRunningOutput: true),
+            ]
+            _ = det.tick(snapshot: tied, now: 0)
+            let r = det.tick(snapshot: tied, now: 0)
+            s.expect(r == nil, "tied output → no Detection (policy stays confirming/idle)")
+        }
+
+        // --- 4. Zoom without output → no detection ---
+        s.check("MeetingDetector tick: Zoom without output stays idle (requiresOutput guard)") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            let zoomInputOnly = [AudioProcessState(pid: 3, bundleID: "us.zoom.xos",
+                                                   isRunningInput: true, isRunningOutput: false)]
+            _ = det.tick(snapshot: zoomInputOnly, now: 0)
+            let r = det.tick(snapshot: zoomInputOnly, now: 0)
+            s.expect(r == nil, "Zoom input-only → no detection")
+        }
+
+        // --- 5. Reset clears state ---
+        s.check("MeetingDetector reset clears last-emitted state so cycle repeats") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(), now: 0)   // confirming
+            _ = det.tick(snapshot: teams(), now: 0)   // active (Detection emitted)
+
+            det.reset()
+
+            _ = det.tick(snapshot: teams(), now: 10)  // confirming again (after reset)
+            let r = det.tick(snapshot: teams(), now: 10) // active again
+            guard let change = r else { s.expect(false, "after reset: expected re-emission"); return }
+            s.expect(change != nil, "Detection re-emitted after reset")
         }
     }
 
