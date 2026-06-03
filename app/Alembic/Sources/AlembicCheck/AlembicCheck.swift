@@ -29,6 +29,11 @@ struct AlembicCheck {
         checkTimestampFormatting(s)
         checkPermissionsLogic(s)
         checkVocabularyStore(s)
+        checkMeetingAppCatalog(s)
+        checkMeetingDetectionPolicy(s)
+        checkDetectInCall(s)
+        checkMeetingDetector(s)
+        checkFoundationOnlyTopLevelAudit(s)
     }
 
     // MARK: - Phase 8: pure permissions / first-run UX logic (no prompts)
@@ -1138,5 +1143,482 @@ struct AlembicCheck {
             s.expectEqual(VocabularyStore.configuredSources(defaults: defaults).count, 0,
                           "explicit empty sources key overrides legacy migration")
         }
+    }
+
+    // MARK: - MeetingAppCatalog
+
+    static func checkMeetingAppCatalog(_ s: CheckSuite) {
+        s.check("MeetingAppCatalog.match: exact bundle IDs match") { s in
+            let m = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")
+            s.expect(m != nil, "exact teams2 match")
+            s.expectEqual(m?.app.displayName, "Microsoft Teams", "teams2 displayName")
+            s.expectEqual(m?.canonicalBundlePrefix, "com.microsoft.teams2", "teams2 canonical prefix")
+
+            let mClassic = MeetingAppCatalog.match(bundleID: "com.microsoft.teams")
+            s.expectEqual(mClassic?.canonicalBundlePrefix, "com.microsoft.teams", "classic Teams canonical prefix")
+
+            let mZoom = MeetingAppCatalog.match(bundleID: "us.zoom.xos")
+            s.expectEqual(mZoom?.app.displayName, "Zoom", "Zoom exact match")
+
+            let mSlack = MeetingAppCatalog.match(bundleID: "com.tinyspeck.slackmacgap")
+            s.expectEqual(mSlack?.app.displayName, "Slack", "Slack exact match")
+        }
+
+        s.check("MeetingAppCatalog.match: helper bundles resolve to parent prefix") { s in
+            let m = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2.modulehost")
+            s.expect(m != nil, "teams2 modulehost matches")
+            s.expectEqual(m?.canonicalBundlePrefix, "com.microsoft.teams2",
+                          "modulehost resolves to teams2 canonical prefix")
+            s.expectEqual(m?.app.displayName, "Microsoft Teams", "modulehost resolves to Teams")
+        }
+
+        s.check("MeetingAppCatalog.match: longest prefix wins (dot-delimited)") { s in
+            // com.microsoft.teams2.modulehost: teams2 (20 chars) beats teams (18 chars)
+            let m2 = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2.modulehost")
+            s.expectEqual(m2?.canonicalBundlePrefix, "com.microsoft.teams2",
+                          "longer prefix teams2 wins over teams for teams2.* helpers")
+
+            // com.microsoft.teams.somehelper should match classic Teams only
+            let mClassic = MeetingAppCatalog.match(bundleID: "com.microsoft.teams.somehelper")
+            s.expectEqual(mClassic?.canonicalBundlePrefix, "com.microsoft.teams",
+                          "classic Teams helper resolves to teams prefix")
+        }
+
+        s.check("MeetingAppCatalog.match: dot-delimited boundary prevents false matches") { s in
+            // "teams2beta" must NOT match "com.microsoft.teams2" (no dot after teams2)
+            s.expect(MeetingAppCatalog.match(bundleID: "com.microsoft.teams2beta") == nil,
+                     "teams2beta must not match teams2 (no dot boundary)")
+
+            // "us.zoom.xosextension" must NOT match "us.zoom.xos"
+            s.expect(MeetingAppCatalog.match(bundleID: "us.zoom.xosextension") == nil,
+                     "xosextension must not match xos (no dot boundary)")
+
+            // "com.tinyspeck.slackmacgapx" must NOT match Slack
+            s.expect(MeetingAppCatalog.match(bundleID: "com.tinyspeck.slackmacgapx") == nil,
+                     "slackmacgapx must not match slackmacgap (no dot boundary)")
+        }
+
+        s.check("MeetingAppCatalog.match: Discord is NOT in the catalog") { s in
+            s.expect(MeetingAppCatalog.match(bundleID: "com.hnc.Discord") == nil,
+                     "Discord not matched")
+            s.expect(MeetingAppCatalog.match(bundleID: "com.discord") == nil,
+                     "discord.com not matched")
+            s.expect(MeetingAppCatalog.match(bundleID: "com.hammerandchisel.discord") == nil,
+                     "Discord legacy ID not matched")
+        }
+
+        s.check("MeetingAppCatalog.match: browser/WebKit helpers match with requiresTitleConfirmation") { s in
+            let chrome = MeetingAppCatalog.match(bundleID: "com.google.Chrome.helper.EH")
+            s.expect(chrome != nil, "Chrome helper is in the catalog")
+            s.expect(chrome?.app.requiresTitleConfirmation == true,
+                     "Chrome helper requires title confirmation")
+
+            let webkit = MeetingAppCatalog.match(bundleID: "com.apple.WebKit.WebContent")
+            s.expect(webkit?.app.requiresTitleConfirmation == true,
+                     "WebKit WebContent requires title confirmation")
+
+            let gpu = MeetingAppCatalog.match(bundleID: "com.apple.WebKit.GPU")
+            s.expect(gpu?.app.requiresTitleConfirmation == true,
+                     "WebKit GPU requires title confirmation")
+        }
+
+        s.check("MeetingAppCatalog.isInCall: Teams in-call via helper bundle") { s in
+            let helper = [
+                AudioProcessState(pid: 400, bundleID: "com.microsoft.teams2.modulehost",
+                                  isRunningInput: true, isRunningOutput: false),
+            ]
+            let app = MeetingAppCatalog.isInCall(processStates: helper)
+            s.expect(app != nil, "Teams2 modulehost triggers detection")
+            s.expectEqual(app?.displayName, "Microsoft Teams", "detected as Microsoft Teams")
+        }
+
+        s.check("MeetingAppCatalog.isInCall: Slack in-call via input OR output") { s in
+            let viaInput = [AudioProcessState(pid: 100, bundleID: "com.tinyspeck.slackmacgap",
+                                              isRunningInput: true, isRunningOutput: false)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: viaInput) != nil,
+                     "Slack in-call via input alone")
+
+            let viaOutput = [AudioProcessState(pid: 100, bundleID: "com.tinyspeck.slackmacgap",
+                                               isRunningInput: false, isRunningOutput: true)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: viaOutput) != nil,
+                     "Slack in-call via output alone")
+
+            let idle = [AudioProcessState(pid: 100, bundleID: "com.tinyspeck.slackmacgap",
+                                          isRunningInput: false, isRunningOutput: false)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: idle) == nil,
+                     "Slack idle → no detection")
+        }
+
+        s.check("MeetingAppCatalog.isInCall: Zoom requiresOutput guard") { s in
+            // Input-only = mic-preview false-start; must NOT detect.
+            let micPreview = [AudioProcessState(pid: 200, bundleID: "us.zoom.xos",
+                                               isRunningInput: true, isRunningOutput: false)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: micPreview) == nil,
+                     "Zoom input-only → no detection (mic-preview guard)")
+
+            // Muted in real meeting: output-only (far-end audio).
+            let mutedInCall = [AudioProcessState(pid: 200, bundleID: "us.zoom.xos",
+                                                isRunningInput: false, isRunningOutput: true)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: mutedInCall) != nil,
+                     "Zoom output-only → in-call (muted in meeting)")
+
+            // Active mic + output = normal call.
+            let activeCall = [AudioProcessState(pid: 200, bundleID: "us.zoom.xos",
+                                               isRunningInput: true, isRunningOutput: true)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: activeCall) != nil,
+                     "Zoom in+out → in-call")
+        }
+
+        s.check("MeetingAppCatalog.isInCall: browser/WebKit helpers NEVER match alone") { s in
+            let chrome = [AudioProcessState(pid: 300, bundleID: "com.google.Chrome.helper.EH",
+                                           isRunningInput: true, isRunningOutput: true)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: chrome) == nil,
+                     "Chrome helper alone → no detection")
+
+            let webkit = [AudioProcessState(pid: 301, bundleID: "com.apple.WebKit.WebContent",
+                                           isRunningInput: true, isRunningOutput: false)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: webkit) == nil,
+                     "WebKit WebContent alone → no detection")
+
+            // Confirm Discord web (running in Chrome helper) also doesn't fire.
+            let discordWeb = [AudioProcessState(pid: 302, bundleID: "com.google.Chrome.helper",
+                                               isRunningInput: false, isRunningOutput: true)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: discordWeb) == nil,
+                     "Discord web in Chrome helper → no detection")
+        }
+
+        s.check("MeetingAppCatalog.isInCall: empty + idle process list → nil") { s in
+            s.expect(MeetingAppCatalog.isInCall(processStates: []) == nil,
+                     "empty list → nil")
+            let unrelated = [AudioProcessState(pid: 1, bundleID: "com.apple.Safari",
+                                              isRunningInput: false, isRunningOutput: false)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: unrelated) == nil,
+                     "unrelated + idle → nil")
+        }
+
+        s.check("MeetingAppCatalog.teamsBundleIDHints is single source of truth") { s in
+            let hints = MeetingAppCatalog.teamsBundleIDHints
+            s.expect(hints.contains("com.microsoft.teams"), "classic Teams prefix present")
+            s.expect(hints.contains("com.microsoft.teams2"), "new Teams prefix present")
+            // ScreenCaptureKitSource must delegate to the same list.
+            s.expectEqual(ScreenCaptureKitSource.teamsBundleIDHints, hints,
+                          "ScreenCaptureKitSource.teamsBundleIDHints delegates to catalog")
+        }
+    }
+
+    // MARK: - MeetingDetectionPolicy
+
+    static func checkMeetingDetectionPolicy(_ s: CheckSuite) {
+        s.check("MeetingDetectionPolicy: idle stays idle on false signal") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4.0, endDebounce: 8.0)
+            s.expectEqual(policy.processSample(isInCall: false, now: 0), .idle,
+                          "false on idle → stays idle")
+            s.expectEqual(policy.processSample(isInCall: false, now: 100), .idle,
+                          "repeated false on idle → still idle")
+        }
+
+        s.check("MeetingDetectionPolicy: no transition before startDebounce") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4.0, endDebounce: 8.0)
+            _ = policy.processSample(isInCall: true, now: 0)
+            let phase = policy.processSample(isInCall: true, now: 3.99)
+            s.expectEqual(phase, .confirming, "just under debounce → still confirming")
+        }
+
+        s.check("MeetingDetectionPolicy: idle → confirming → active on sustained signal") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4.0, endDebounce: 8.0)
+            s.expectEqual(policy.processSample(isInCall: true, now: 0), .confirming,
+                          "first signal → confirming")
+            s.expectEqual(policy.processSample(isInCall: true, now: 2), .confirming,
+                          "sustained, under debounce → still confirming")
+            s.expectEqual(policy.processSample(isInCall: true, now: 4), .active,
+                          "exactly at startDebounce → active")
+        }
+
+        s.check("MeetingDetectionPolicy: false signal during confirming resets to idle") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4.0, endDebounce: 8.0)
+            _ = policy.processSample(isInCall: true, now: 0)
+            s.expectEqual(policy.phase, .confirming, "entered confirming")
+            s.expectEqual(policy.processSample(isInCall: false, now: 2), .idle,
+                          "false during confirming → back to idle")
+        }
+
+        s.check("MeetingDetectionPolicy: active → ending → idle on sustained absence") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4.0, endDebounce: 8.0)
+            _ = policy.processSample(isInCall: true, now: 0)
+            _ = policy.processSample(isInCall: true, now: 4)  // → active
+            s.expectEqual(policy.phase, .active, "confirmed active")
+
+            _ = policy.processSample(isInCall: false, now: 5)  // → ending
+            s.expectEqual(policy.phase, .ending, "signal dropped → ending")
+
+            _ = policy.processSample(isInCall: false, now: 12.99)  // 7.99s < endDebounce(8)
+            s.expectEqual(policy.phase, .ending, "still ending just before endDebounce")
+
+            s.expectEqual(policy.processSample(isInCall: false, now: 13), .idle,
+                          "exactly at endDebounce → idle")
+        }
+
+        s.check("MeetingDetectionPolicy: re-enter call during ending → back to active") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4.0, endDebounce: 8.0)
+            _ = policy.processSample(isInCall: true, now: 0)
+            _ = policy.processSample(isInCall: true, now: 4)   // active
+            _ = policy.processSample(isInCall: false, now: 5)  // ending
+            s.expectEqual(policy.phase, .ending, "in ending phase")
+
+            s.expectEqual(policy.processSample(isInCall: true, now: 7), .active,
+                          "signal returns during ending → active (no new start-debounce)")
+        }
+
+        s.check("MeetingDetectionPolicy: reset() returns to idle from any phase") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4.0, endDebounce: 8.0)
+            _ = policy.processSample(isInCall: true, now: 0)
+            _ = policy.processSample(isInCall: true, now: 5)   // active
+            s.expectEqual(policy.phase, .active, "confirmed active before reset")
+
+            policy.reset()
+            s.expectEqual(policy.phase, .idle, "reset() → idle")
+
+            // Verify a fresh debounce is required after reset.
+            s.expectEqual(policy.processSample(isInCall: true, now: 10), .confirming,
+                          "confirming after reset (fresh start-debounce required)")
+        }
+
+        s.check("MeetingDetectionPolicy: multiple full cycles work correctly") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4.0, endDebounce: 8.0)
+
+            // Cycle 1
+            _ = policy.processSample(isInCall: true, now: 0)
+            _ = policy.processSample(isInCall: true, now: 4)   // active at t=4
+            _ = policy.processSample(isInCall: false, now: 5)  // ending
+            _ = policy.processSample(isInCall: false, now: 13) // idle
+
+            // Cycle 2
+            _ = policy.processSample(isInCall: true, now: 20)  // confirming
+            s.expectEqual(policy.processSample(isInCall: true, now: 24), .active,
+                          "second cycle active at t=24")
+        }
+    }
+
+    // MARK: - Phase 4 (detectInCall): conflict resolution + title confirmation
+
+    /// Tests for `MeetingAppCatalog.detectInCall` — the cases that go beyond what
+    /// the existing `isInCall` / `match` checks already cover.
+    static func checkDetectInCall(_ s: CheckSuite) {
+
+        func state(_ bundleID: String, input: Bool = false, output: Bool = false) -> AudioProcessState {
+            AudioProcessState(pid: 1, bundleID: bundleID, isRunningInput: input, isRunningOutput: output)
+        }
+
+        // --- Multi-app conflict: output-active wins ---
+        s.check("detectInCall conflict: output-active app wins over input-only app") { s in
+            let states = [
+                state("com.microsoft.teams2", input: true, output: false),  // Teams: input only
+                state("com.tinyspeck.slackmacgap", input: true, output: true),  // Slack: both
+            ]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match?.app.displayName == "Slack", "Slack (has output) wins over Teams (input-only)")
+        }
+
+        // --- Multi-app conflict: tie (both have output) → nil ---
+        s.check("detectInCall conflict: tied output → nil (do not guess)") { s in
+            let states = [
+                state("com.microsoft.teams2", input: true, output: true),
+                state("com.tinyspeck.slackmacgap", input: true, output: true),
+            ]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match == nil, "tied output → no detection to avoid wrong auto-start")
+        }
+
+        // --- requiresTitleConfirmation unlocked by matching hint ---
+        s.check("detectInCall: requiresTitleConfirmation unlocked when title hint present") { s in
+            let states = [state("com.google.Chrome.helper", input: true, output: true)]
+            let confirmed: Set<String> = ["Meet – Google Meet"]
+            let match = MeetingAppCatalog.detectInCall(processStates: states, confirmedTitles: confirmed)
+            s.expect(match != nil, "Chrome helper + 'Meet –' title hint → detection unlocked")
+            s.expect(match?.app.displayName == "Google Meet (browser)", "matched Google Meet browser entry")
+        }
+
+        // --- requiresTitleConfirmation locked without hint ---
+        s.check("detectInCall: requiresTitleConfirmation blocks detection without matching title") { s in
+            let states = [state("com.google.Chrome.helper", input: true, output: true)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match == nil, "Chrome helper alone (no title) → no detection")
+        }
+
+        // --- requiresOutput guard: Zoom with input only → no detection ---
+        s.check("detectInCall: requiresOutput blocks Zoom input-only (Settings audio preview)") { s in
+            let states = [state("us.zoom.xos", input: true, output: false)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match == nil, "Zoom input-only → no detection (mic preview guard)")
+        }
+
+        // --- requiresOutput guard: Zoom with output → detection ---
+        s.check("detectInCall: requiresOutput allows Zoom when output is active") { s in
+            let states = [state("us.zoom.xos", input: true, output: true)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match?.app.displayName == "Zoom", "Zoom with output → detected")
+        }
+
+        // --- Helper / renderer bundle IDs resolve to canonical parent prefix ---
+        s.check("detectInCall: Teams helper bundle resolves to canonical parent prefix") { s in
+            let states = [state("com.microsoft.teams2.modulehost", input: true, output: false)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match?.canonicalBundlePrefix == "com.microsoft.teams2",
+                     "teams2.modulehost maps to com.microsoft.teams2")
+        }
+    }
+
+    // MARK: - Phase 4 (MeetingDetector): synchronous tick-based integration
+
+    /// Tests `MeetingDetector.tick()` directly (synchronous, no async needed).
+    ///
+    /// Uses zero-length debounces so state transitions are immediate:
+    /// - idle → confirming on the first in-call tick
+    /// - confirming → active on the second in-call tick (elapsed ≥ 0)
+    /// - active → ending on first no-call tick
+    /// - ending → idle on second no-call tick (elapsed ≥ 0)
+    static func checkMeetingDetector(_ s: CheckSuite) {
+
+        func teams(output: Bool = false) -> [AudioProcessState] {
+            [AudioProcessState(pid: 200, bundleID: "com.microsoft.teams2",
+                               isRunningInput: true, isRunningOutput: output)]
+        }
+
+        // --- 1. Full idle → active → idle cycle ---
+        s.check("MeetingDetector tick: full idle→active→idle cycle with zero debounce") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+
+            // tick 1: idle → confirming (no emission)
+            let r1 = det.tick(snapshot: teams(), now: 0)
+            s.expect(r1 == nil, "idle→confirming: no change emitted")
+
+            // tick 2: confirming → active (Detection emitted)
+            let r2 = det.tick(snapshot: teams(), now: 0)
+            guard let change2 = r2 else { s.expect(false, "active: expected change emitted"); return }
+            guard let detection = change2 else { s.expect(false, "active: expected non-nil Detection"); return }
+            s.expectEqual(detection.app.displayName, "Microsoft Teams", "detected Teams")
+            s.expectEqual(detection.canonicalBundlePrefix, "com.microsoft.teams2", "canonical prefix")
+            s.expect(!detection.hasOutput, "input-only → hasOutput false")
+
+            // tick 3: still active → no change
+            let r3 = det.tick(snapshot: teams(), now: 1)
+            s.expect(r3 == nil, "still active: no duplicate emission")
+
+            // tick 4: active → ending (no emission yet)
+            let r4 = det.tick(snapshot: [], now: 2)
+            s.expect(r4 == nil, "ending: no change until end-debounce elapses")
+
+            // tick 5: ending → idle (nil emitted = call ended)
+            let r5 = det.tick(snapshot: [], now: 2)
+            guard let change5 = r5 else { s.expect(false, "idle: expected change emitted"); return }
+            s.expect(change5 == nil, "nil emitted = call ended")
+        }
+
+        // --- 2. hasOutput reflects process state ---
+        s.check("MeetingDetector tick: hasOutput true when output process present") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(output: true), now: 0)  // confirming
+            let r = det.tick(snapshot: teams(output: true), now: 0)  // active
+            guard let d = r?.flatMap({ $0 }) else { s.expect(false, "expected Detection"); return }
+            s.expect(d.hasOutput, "output process present → hasOutput true")
+        }
+
+        // --- 3. Multi-app tie → no detection ---
+        s.check("MeetingDetector tick: multi-app tied output → no detection") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            let tied: [AudioProcessState] = [
+                AudioProcessState(pid: 1, bundleID: "com.microsoft.teams2",
+                                  isRunningInput: true, isRunningOutput: true),
+                AudioProcessState(pid: 2, bundleID: "com.tinyspeck.slackmacgap",
+                                  isRunningInput: true, isRunningOutput: true),
+            ]
+            _ = det.tick(snapshot: tied, now: 0)
+            let r = det.tick(snapshot: tied, now: 0)
+            s.expect(r == nil, "tied output → no Detection (policy stays confirming/idle)")
+        }
+
+        // --- 4. Zoom without output → no detection ---
+        s.check("MeetingDetector tick: Zoom without output stays idle (requiresOutput guard)") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            let zoomInputOnly = [AudioProcessState(pid: 3, bundleID: "us.zoom.xos",
+                                                   isRunningInput: true, isRunningOutput: false)]
+            _ = det.tick(snapshot: zoomInputOnly, now: 0)
+            let r = det.tick(snapshot: zoomInputOnly, now: 0)
+            s.expect(r == nil, "Zoom input-only → no detection")
+        }
+
+        // --- 5. Reset clears state ---
+        s.check("MeetingDetector reset clears last-emitted state so cycle repeats") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(), now: 0)   // confirming
+            _ = det.tick(snapshot: teams(), now: 0)   // active (Detection emitted)
+
+            det.reset()
+
+            _ = det.tick(snapshot: teams(), now: 10)  // confirming again (after reset)
+            let r = det.tick(snapshot: teams(), now: 10) // active again
+            guard let change = r else { s.expect(false, "after reset: expected re-emission"); return }
+            s.expect(change != nil, "Detection re-emitted after reset")
+        }
+    }
+
+    // MARK: - Foundation-only top-level AlembicKit audit
+
+    /// Asserts that all `.swift` files directly under `Sources/AlembicKit/`
+    /// (i.e. not in subdirectories) contain no imports of Apple platform
+    /// frameworks. Those imports are only permitted under `Platform/macOS/`.
+    static func checkFoundationOnlyTopLevelAudit(_ s: CheckSuite) {
+        let forbiddenFrameworks: [String] = [
+            "AVFoundation", "CoreMedia", "ScreenCaptureKit", "Speech",
+            "CoreGraphics", "AppKit", "UIKit", "SwiftUI", "Combine",
+            "CoreAudio", "AudioToolbox", "CoreBluetooth",
+        ]
+
+        let topLevelDir = URL(fileURLWithPath: "Sources/AlembicKit")
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: topLevelDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsSubdirectoryDescendants, .skipsHiddenFiles]
+        ) else {
+            s.expect(false, "Foundation-only audit: cannot enumerate Sources/AlembicKit/")
+            return
+        }
+
+        var auditedCount = 0
+        for case let url as URL in enumerator {
+            guard url.pathExtension == "swift" else { continue }
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            let filename = url.lastPathComponent
+            auditedCount += 1
+
+            for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
+                let trimmed = String(line).trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("import ") else { continue }
+                for fw in forbiddenFrameworks {
+                    s.expect(
+                        !trimmed.contains(fw),
+                        "Foundation-only violation: \(filename) imports \(fw)"
+                    )
+                }
+            }
+        }
+        s.expect(auditedCount > 0,
+                 "Foundation-only audit checked at least one file (Sources/AlembicKit/ found)")
     }
 }
