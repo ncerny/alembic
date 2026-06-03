@@ -33,6 +33,8 @@ struct AlembicCheck {
         checkMeetingDetectionPolicy(s)
         checkDetectInCall(s)
         checkMeetingDetector(s)
+        checkMeetingContext(s)
+        checkBestTitle(s)
         checkFoundationOnlyTopLevelAudit(s)
     }
 
@@ -330,6 +332,26 @@ struct AlembicCheck {
 
     // MARK: - Phase 5: TranscriptWriter (incremental disk persistence)
 
+    /// Strips the YAML frontmatter block (everything up to and including the
+    /// closing `---` line) from `.md` content and returns the remaining lines.
+    /// Used by render-format tests that need to inspect segment lines only.
+    private static func transcriptLines(in md: String) -> [String] {
+        let lines = md.components(separatedBy: "\n")
+        // Find the closing --- (second occurrence of ---)
+        var dashCount = 0
+        var start = 0
+        for (i, line) in lines.enumerated() {
+            if line == "---" {
+                dashCount += 1
+                if dashCount == 2 {
+                    start = i + 1
+                    break
+                }
+            }
+        }
+        return lines[start...].filter { !$0.isEmpty }
+    }
+
     static func checkTranscriptWriter(_ s: CheckSuite) async {
         // Each check writes into a unique temp subdir and cleans it up.
         func makeTempDir() throws -> URL {
@@ -457,10 +479,55 @@ struct AlembicCheck {
 
             if let mdURL {
                 let md = try String(contentsOf: mdURL, encoding: .utf8)
-                let firstLine = md.split(separator: "\n").first.map(String.init) ?? ""
-                s.expectEqual(firstLine, "[01:01:01] them: on the hour", "readable line format")
+                // Skip the YAML frontmatter block before asserting segment lines.
+                let firstSegmentLine = transcriptLines(in: md).first ?? ""
+                s.expectEqual(firstSegmentLine, "[01:01:01] them: on the hour", "readable line format")
                 s.expect(mdURL.lastPathComponent.hasSuffix(".md"), "render file uses .md extension")
             }
+        }
+
+        await s.checkAsync("TranscriptWriter context init: frontmatter in .md, hyphen-collapsed filename") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let date = Date(timeIntervalSince1970: 1_748_951_400) // 2025-06-03T12:30:00Z
+            let ctx = MeetingContext(
+                windowTitle: "CI Agent - DSU",
+                appDisplayName: "Microsoft Teams",
+                bundleID: "com.microsoft.teams2",
+                localeIdentifier: "en-US",
+                startDate: date
+            )
+            let writer = try TranscriptWriter(context: ctx, directory: dir, writeReadableRender: true)
+
+            // File name must use the sanitized, hyphen-collapsed title.
+            s.expect(writer.outputURL.lastPathComponent.hasSuffix("-CI-Agent-DSU.jsonl"),
+                     "hyphen-collapsed title in .jsonl filename: \(writer.outputURL.lastPathComponent)")
+            s.expect(writer.readableURL?.lastPathComponent.hasSuffix("-CI-Agent-DSU.md") == true,
+                     "hyphen-collapsed title in .md filename")
+
+            // .md must open with frontmatter block.
+            if let mdURL = writer.readableURL {
+                let md = try String(contentsOf: mdURL, encoding: .utf8)
+                s.expect(md.hasPrefix("---\n"), ".md starts with ---")
+                s.expect(md.contains("title:"), ".md frontmatter contains title key")
+                s.expect(md.contains("startTime:"), ".md frontmatter contains startTime key")
+            }
+            await writer.close()
+        }
+
+        await s.checkAsync("TranscriptWriter context init: empty nameForFile → stamp-only filename") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let date = Date(timeIntervalSince1970: 1_748_951_400) // 2025-06-03T12:30:00Z
+            let ctx = MeetingContext(startDate: date)   // both windowTitle and appDisplayName nil
+            let writer = try TranscriptWriter(context: ctx, directory: dir)
+            // Filename must be stamp-only (no trailing hyphen).
+            let name = writer.outputURL.lastPathComponent
+            s.expect(!name.contains("-.jsonl"), "no trailing hyphen before extension: \(name)")
+            s.expect(name.hasSuffix(".jsonl"), ".jsonl extension present")
+            await writer.close()
         }
 
         await s.checkAsync("TranscriptWriter default directory is ~/Documents/Alembic") { s in
@@ -1574,6 +1641,149 @@ struct AlembicCheck {
             let r = det.tick(snapshot: teams(), now: 10) // active again
             guard let change = r else { s.expect(false, "after reset: expected re-emission"); return }
             s.expect(change != nil, "Detection re-emitted after reset")
+        }
+    }
+
+    // MARK: - Phase 9: MeetingContext — file naming + YAML frontmatter + bestTitle
+
+    static func checkMeetingContext(_ s: CheckSuite) {
+        s.check("MeetingContext nameForFile fallback chain") { s in
+            s.expectEqual(
+                MeetingContext(windowTitle: "CI Agent - DSU").nameForFile,
+                "CI Agent - DSU",
+                "windowTitle wins when set"
+            )
+            s.expectEqual(
+                MeetingContext(appDisplayName: "Microsoft Teams").nameForFile,
+                "Microsoft Teams",
+                "appDisplayName wins when windowTitle nil"
+            )
+            s.expectEqual(
+                MeetingContext().nameForFile,
+                "",
+                "empty string when both nil"
+            )
+        }
+
+        s.check("MeetingContext yamlFrontmatter: standard fields present and block delimiters") { s in
+            let date = Date(timeIntervalSince1970: 1_748_951_400) // 2025-06-03T12:30:00Z
+            let ctx = MeetingContext(
+                windowTitle: "Standup",
+                appDisplayName: "Microsoft Teams",
+                bundleID: "com.microsoft.teams2",
+                localeIdentifier: "en-US",
+                startDate: date
+            )
+            let fm = ctx.yamlFrontmatter()
+            s.expect(fm.hasPrefix("---\n"), "starts with ---")
+            s.expect(fm.hasSuffix("---\n"), "ends with ---")
+            s.expect(fm.contains("title:"), "contains title key")
+            s.expect(fm.contains("app:"), "contains app key")
+            s.expect(fm.contains("bundleID:"), "contains bundleID key")
+            s.expect(fm.contains("startTime:"), "contains startTime key")
+            s.expect(fm.contains("locale:"), "contains locale key")
+        }
+
+        s.check("MeetingContext yamlFrontmatter: nil fields are omitted") { s in
+            let ctx = MeetingContext(startDate: Date())
+            let fm = ctx.yamlFrontmatter()
+            s.expect(!fm.contains("title:"), "nil windowTitle omitted")
+            s.expect(!fm.contains("app:"), "nil appDisplayName omitted")
+            s.expect(!fm.contains("bundleID:"), "nil bundleID omitted")
+            s.expect(!fm.contains("locale:"), "nil localeIdentifier omitted")
+        }
+
+        s.check("MeetingContext yamlFrontmatter: hostile title with colon, hash, quotes, backslash") { s in
+            let ctx = MeetingContext(
+                windowTitle: "title: \"value\" # comment \\ end",
+                startDate: Date()
+            )
+            let fm = ctx.yamlFrontmatter()
+            // Value must be wrapped in double-quotes and all special chars escaped
+            s.expect(fm.contains("title: \"title: \\\"value\\\" # comment \\\\ end\""),
+                     "colon/hash/quotes/backslash escaped")
+        }
+
+        s.check("MeetingContext yamlFrontmatter: hostile title with newline and tab") { s in
+            let ctx = MeetingContext(windowTitle: "line1\nline2\there", startDate: Date())
+            let fm = ctx.yamlFrontmatter()
+            s.expect(fm.contains("\\n"), "newline escaped in scalar")
+            s.expect(fm.contains("\\t"), "tab escaped in scalar")
+            // Must still be a single YAML line (no literal newlines inside the scalar)
+            let titleLine = fm.components(separatedBy: "\n").first(where: { $0.hasPrefix("title:") })
+            s.expect(titleLine != nil, "title key exists")
+        }
+
+        s.check("MeetingContext yamlFrontmatter: YAML-breaking title '---'") { s in
+            let ctx = MeetingContext(windowTitle: "---", startDate: Date())
+            let fm = ctx.yamlFrontmatter()
+            // The '---' inside a double-quoted scalar is harmless
+            s.expect(fm.contains("title: \"---\""), "--- wrapped in quotes")
+        }
+
+        s.check("MeetingContext yamlFrontmatter: emoji in title passes through safely") { s in
+            let ctx = MeetingContext(windowTitle: "Sprint 🚀 Review", startDate: Date())
+            let fm = ctx.yamlFrontmatter()
+            s.expect(fm.contains("Sprint 🚀 Review"), "emoji preserved in quoted scalar")
+        }
+
+        s.check("MeetingContext yamlFrontmatter: extra key-value pairs are quoted") { s in
+            let ctx = MeetingContext(
+                startDate: Date(),
+                extra: [("custom:key", "value\"with\"quotes")]
+            )
+            let fm = ctx.yamlFrontmatter()
+            s.expect(fm.contains("\"custom:key\""), "extra key is quoted")
+            s.expect(fm.contains("\"value\\\"with\\\"quotes\""), "extra value is quoted")
+        }
+
+        s.check("MeetingContext yamlQuote: control characters use \\uXXXX form") { s in
+            let result = MeetingContext.yamlQuote("\u{01}\u{1F}\u{7F}")
+            s.expect(result.contains("\\u0001"), "SOH → \\u0001")
+            s.expect(result.contains("\\u001F"), "US → \\u001F")
+            s.expect(result.contains("\\u007F"), "DEL → \\u007F")
+        }
+    }
+
+    static func checkBestTitle(_ s: CheckSuite) {
+        s.check("bestTitle: empty candidates → nil") { s in
+            s.expect(MeetingContext.bestTitle(from: []) == nil, "empty → nil")
+        }
+
+        s.check("bestTitle: all-empty candidates → nil") { s in
+            s.expect(MeetingContext.bestTitle(from: ["", ""]) == nil, "all empty → nil")
+        }
+
+        s.check("bestTitle: single non-empty candidate returned") { s in
+            s.expectEqual(
+                MeetingContext.bestTitle(from: ["Only Title"]),
+                "Only Title",
+                "single candidate returned"
+            )
+        }
+
+        s.check("bestTitle: hint-match wins over longer title") { s in
+            let result = MeetingContext.bestTitle(
+                from: ["Zoom Meeting", "A very very very long unrelated title"],
+                appHints: ["Zoom Meeting"]
+            )
+            s.expectEqual(result, "Zoom Meeting", "hint-match preferred over longer")
+        }
+
+        s.check("bestTitle: longest title wins when no hint matches") { s in
+            let result = MeetingContext.bestTitle(
+                from: ["Short", "Medium title", "The longest title here"],
+                appHints: ["Zoom Meeting"]
+            )
+            s.expectEqual(result, "The longest title here", "longest picked when no hint match")
+        }
+
+        s.check("bestTitle: longest title wins with no hints provided") { s in
+            let result = MeetingContext.bestTitle(
+                from: ["A", "BB", "CCC"],
+                appHints: []
+            )
+            s.expectEqual(result, "CCC", "longest picked with empty hints")
         }
     }
 
