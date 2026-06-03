@@ -1289,14 +1289,29 @@ struct AlembicCheck {
                      "WebKit GPU requires title confirmation")
         }
 
-        s.check("MeetingAppCatalog.isInCall: Teams in-call via helper bundle") { s in
+        s.check("MeetingAppCatalog.isInCall: Teams in-call via helper bundle (with output)") { s in
             let helper = [
                 AudioProcessState(pid: 400, bundleID: "com.microsoft.teams2.modulehost",
-                                  isRunningInput: true, isRunningOutput: false),
+                                  isRunningInput: true, isRunningOutput: true),
             ]
             let app = MeetingAppCatalog.isInCall(processStates: helper)
-            s.expect(app != nil, "Teams2 modulehost triggers detection")
+            s.expect(app != nil, "Teams2 modulehost with output triggers detection")
             s.expectEqual(app?.displayName, "Microsoft Teams", "detected as Microsoft Teams")
+        }
+
+        s.check("MeetingAppCatalog.isInCall: Teams requiresOutput guard") { s in
+            // Input-only = Teams is not in-call (requiresOutput enforced, mirrors Zoom guard).
+            let micOnly = [AudioProcessState(pid: 400, bundleID: "com.microsoft.teams2",
+                                            isRunningInput: true, isRunningOutput: false)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: micOnly) == nil,
+                     "Teams input-only → no detection (requiresOutput guard)")
+
+            // Output present = in-call (muted or active in meeting).
+            let withOutput = [AudioProcessState(pid: 400, bundleID: "com.microsoft.teams2",
+                                               isRunningInput: true, isRunningOutput: true)]
+            let detected = MeetingAppCatalog.isInCall(processStates: withOutput)
+            s.expect(detected != nil, "Teams with output → detection")
+            s.expectEqual(detected?.displayName, "Microsoft Teams", "Teams with output → Microsoft Teams")
         }
 
         s.check("MeetingAppCatalog.isInCall: Slack in-call via input OR output") { s in
@@ -1476,14 +1491,14 @@ struct AlembicCheck {
             AudioProcessState(pid: 1, bundleID: bundleID, isRunningInput: input, isRunningOutput: output)
         }
 
-        // --- Multi-app conflict: output-active wins ---
+        // --- Multi-app conflict: output-active app wins ---
         s.check("detectInCall conflict: output-active app wins over input-only app") { s in
             let states = [
-                state("com.microsoft.teams2", input: true, output: false),  // Teams: input only
-                state("com.tinyspeck.slackmacgap", input: true, output: true),  // Slack: both
+                state("com.microsoft.teams2", input: true, output: false),  // Teams: input only → NOT a candidate (requiresOutput)
+                state("com.tinyspeck.slackmacgap", input: true, output: true),  // Slack: both → candidate
             ]
             let match = MeetingAppCatalog.detectInCall(processStates: states)
-            s.expect(match?.app.displayName == "Slack", "Slack (has output) wins over Teams (input-only)")
+            s.expect(match?.app.displayName == "Slack", "Slack (sole candidate, has output) wins; Teams excluded by requiresOutput")
         }
 
         // --- Multi-app conflict: tie (both have output) → nil ---
@@ -1526,9 +1541,23 @@ struct AlembicCheck {
             s.expect(match?.app.displayName == "Zoom", "Zoom with output → detected")
         }
 
+        // --- requiresOutput guard: Teams with input only → no detection ---
+        s.check("detectInCall: requiresOutput blocks Teams input-only") { s in
+            let states = [state("com.microsoft.teams2", input: true, output: false)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match == nil, "Teams input-only → no detection (requiresOutput guard)")
+        }
+
+        // --- requiresOutput guard: Teams with output → detection ---
+        s.check("detectInCall: requiresOutput allows Teams when output is active") { s in
+            let states = [state("com.microsoft.teams2", input: true, output: true)]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expect(match?.app.displayName == "Microsoft Teams", "Teams with output → detected")
+        }
+
         // --- Helper / renderer bundle IDs resolve to canonical parent prefix ---
         s.check("detectInCall: Teams helper bundle resolves to canonical parent prefix") { s in
-            let states = [state("com.microsoft.teams2.modulehost", input: true, output: false)]
+            let states = [state("com.microsoft.teams2.modulehost", input: true, output: true)]
             let match = MeetingAppCatalog.detectInCall(processStates: states)
             s.expect(match?.canonicalBundlePrefix == "com.microsoft.teams2",
                      "teams2.modulehost maps to com.microsoft.teams2")
@@ -1546,7 +1575,7 @@ struct AlembicCheck {
     /// - ending → idle on second no-call tick (elapsed ≥ 0)
     static func checkMeetingDetector(_ s: CheckSuite) {
 
-        func teams(output: Bool = false) -> [AudioProcessState] {
+        func teams(output: Bool = true) -> [AudioProcessState] {
             [AudioProcessState(pid: 200, bundleID: "com.microsoft.teams2",
                                isRunningInput: true, isRunningOutput: output)]
         }
@@ -1568,7 +1597,7 @@ struct AlembicCheck {
             guard let detection = change2 else { s.expect(false, "active: expected non-nil Detection"); return }
             s.expectEqual(detection.app.displayName, "Microsoft Teams", "detected Teams")
             s.expectEqual(detection.canonicalBundlePrefix, "com.microsoft.teams2", "canonical prefix")
-            s.expect(!detection.hasOutput, "input-only → hasOutput false")
+            s.expect(detection.hasOutput, "output present → hasOutput true")
 
             // tick 3: still active → no change
             let r3 = det.tick(snapshot: teams(), now: 1)
@@ -1784,6 +1813,59 @@ struct AlembicCheck {
                 appHints: []
             )
             s.expectEqual(result, "CCC", "longest picked with empty hints")
+        }
+
+        // MARK: Exclusion checks
+
+        s.check("bestTitle: excluded leading segment is dropped") { s in
+            let result = MeetingContext.bestTitle(
+                from: ["Chat | Kelekis, Dimitrios | Microsoft Teams", "Weekly Standup | Microsoft Teams"],
+                exclusions: ["Chat"]
+            )
+            s.expectEqual(result, "Weekly Standup | Microsoft Teams", "hub window excluded")
+        }
+
+        s.check("bestTitle: meeting title wins over longer excluded hub title") { s in
+            // Regression: "Chat | Kelekis, Dimitrios | Microsoft Teams" (43 chars) was
+            // incorrectly beating "Weekly GSE LT Connect | Microsoft Teams" (39 chars).
+            let result = MeetingContext.bestTitle(
+                from: [
+                    "Weekly GSE LT Connect | Microsoft Teams",
+                    "Chat | Kelekis, Dimitrios | Microsoft Teams",
+                ],
+                exclusions: ["Chat", "Activity", "Calendar", "Calls", "Teams and Channels", "Files", "Microsoft Teams"]
+            )
+            s.expectEqual(result, "Weekly GSE LT Connect | Microsoft Teams", "meeting title wins over longer excluded hub title")
+        }
+
+        s.check("bestTitle: all-excluded falls back to original candidates (no nil regression)") { s in
+            let result = MeetingContext.bestTitle(
+                from: ["Chat | Alice | Microsoft Teams", "Calendar | Microsoft Teams"],
+                exclusions: ["Chat", "Calendar"]
+            )
+            // Both candidates excluded → fall back to longest of original set.
+            s.expect(result != nil, "non-nil when all excluded")
+            s.expectEqual(result, "Chat | Alice | Microsoft Teams", "longest original candidate returned as fallback")
+        }
+
+        s.check("bestTitle: empty exclusions preserves existing behavior") { s in
+            let result = MeetingContext.bestTitle(
+                from: ["Short", "A longer title wins"],
+                exclusions: []
+            )
+            s.expectEqual(result, "A longer title wins", "longest wins with empty exclusions")
+        }
+
+        // Verify Teams catalog entry exposes the expected nonMeetingTitlePrefixes.
+        s.check("Teams catalog entry has nonMeetingTitlePrefixes seeded") { s in
+            let prefixes = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.nonMeetingTitlePrefixes ?? []
+            s.expect(prefixes.contains("Chat"), "Chat in Teams exclusions")
+            s.expect(prefixes.contains("Calendar"), "Calendar in Teams exclusions")
+            s.expect(prefixes.contains("Calls"), "Calls in Teams exclusions")
+            s.expect(prefixes.contains("Activity"), "Activity in Teams exclusions")
+            s.expect(prefixes.contains("Files"), "Files in Teams exclusions")
+            s.expect(prefixes.contains("Teams and Channels"), "Teams and Channels in Teams exclusions")
+            s.expect(prefixes.contains("Microsoft Teams"), "Microsoft Teams in Teams exclusions")
         }
     }
 

@@ -32,18 +32,30 @@ public struct MeetingApp: Sendable, Equatable {
     /// confirm or disambiguate detections.
     public let titleHints: [String]
 
+    /// Leading ` | `-delimited window-title segments that identify non-meeting
+    /// windows for this app (e.g. Teams hub sections like "Chat", "Calendar").
+    ///
+    /// `MeetingContext.bestTitle` uses these as exclusions: any candidate whose
+    /// first ` | `-delimited segment (trimmed) exactly matches one of these
+    /// strings is dropped before title ranking. If all candidates are excluded,
+    /// the function falls back to the standard ranking over the original
+    /// candidates so a title is never lost.
+    public let nonMeetingTitlePrefixes: [String]
+
     public init(
         displayName: String,
         bundlePrefixes: [String],
         requiresOutput: Bool = false,
         requiresTitleConfirmation: Bool = false,
-        titleHints: [String] = []
+        titleHints: [String] = [],
+        nonMeetingTitlePrefixes: [String] = []
     ) {
         self.displayName = displayName
         self.bundlePrefixes = bundlePrefixes
         self.requiresOutput = requiresOutput
         self.requiresTitleConfirmation = requiresTitleConfirmation
         self.titleHints = titleHints
+        self.nonMeetingTitlePrefixes = nonMeetingTitlePrefixes
     }
 }
 
@@ -114,6 +126,11 @@ public enum MeetingAppCatalog {
             bundlePrefixes: [
                 "com.microsoft.teams",   // Teams classic
                 "com.microsoft.teams2",  // Teams new (covers .modulehost, .helper, etc.)
+            ],
+            requiresOutput: true,    // Teams holds the mic outside calls; output confirms in-call
+            nonMeetingTitlePrefixes: [
+                "Chat", "Activity", "Calendar", "Calls",
+                "Teams and Channels", "Files", "Microsoft Teams",
             ]
         ),
         MeetingApp(

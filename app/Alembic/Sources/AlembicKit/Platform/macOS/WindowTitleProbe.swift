@@ -56,7 +56,7 @@ public struct WindowTitleProbe: Sendable {
     ///
     /// Uses the Screen Recording permission Alembic already holds; no new
     /// permission is required.
-    public static func fullTitle(forBundleID bundleID: String, appHints: [String] = []) -> String? {
+    public static func fullTitle(forBundleID bundleID: String, appHints: [String] = [], exclusions: [String] = []) -> String? {
         var candidatePIDs: Set<Int32> = []
 
         // If the id is a raw PID reference (e.g. "pid:1234"), use it directly.
@@ -97,6 +97,6 @@ public struct WindowTitleProbe: Sendable {
             candidates.append(title)
         }
 
-        return MeetingContext.bestTitle(from: candidates, appHints: appHints)
+        return MeetingContext.bestTitle(from: candidates, appHints: appHints, exclusions: exclusions)
     }
 }

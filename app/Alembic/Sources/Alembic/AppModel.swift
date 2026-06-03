@@ -237,8 +237,9 @@ final class AppModel {
         // isPreparingModels stays true until the context is published so a second
         // start() invocation cannot interleave while the session is still idle.
         let appHints = MeetingAppCatalog.match(bundleID: target.id)?.app.titleHints ?? []
+        let exclusions = MeetingAppCatalog.match(bundleID: target.id)?.app.nonMeetingTitlePrefixes ?? []
         let windowTitle = await Task.detached(priority: .userInitiated) {
-            WindowTitleProbe.fullTitle(forBundleID: target.id, appHints: appHints)
+            WindowTitleProbe.fullTitle(forBundleID: target.id, appHints: appHints, exclusions: exclusions)
         }.value
         let ctx = MeetingContext(
             windowTitle: windowTitle,
