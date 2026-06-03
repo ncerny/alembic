@@ -84,22 +84,47 @@ public struct MeetingContext: Sendable {
     /// Picks the best window title from a set of candidates.
     ///
     /// Selection rules (in priority order):
-    /// 1. The first candidate whose text contains one of `appHints`.
-    /// 2. The longest non-empty candidate.
-    /// 3. `nil` when `candidates` is empty or all are empty.
+    /// 1. Drop any candidate whose leading ` | `-delimited segment (trimmed)
+    ///    exactly matches an entry in `exclusions` (e.g. Teams hub sections
+    ///    like "Chat" or "Calendar"). If every non-empty candidate is excluded,
+    ///    the exclusion step is skipped and the full non-empty set is used so a
+    ///    title is never lost.
+    /// 2. The first remaining candidate whose text contains one of `appHints`.
+    /// 3. The longest remaining non-empty candidate.
+    /// 4. `nil` when `candidates` is empty or all are empty.
     ///
     /// This function is pure and Foundation-only so it can be exercised by
     /// `AlembicCheck` without a live window server.
-    public static func bestTitle(from candidates: [String], appHints: [String] = []) -> String? {
+    public static func bestTitle(
+        from candidates: [String],
+        appHints: [String] = [],
+        exclusions: [String] = []
+    ) -> String? {
         let nonempty = candidates.filter { !$0.isEmpty }
         guard !nonempty.isEmpty else { return nil }
 
+        // Apply leading-segment exclusions when provided.
+        let pool: [String]
+        if !exclusions.isEmpty {
+            let filtered = nonempty.filter { candidate in
+                let leading = candidate
+                    .components(separatedBy: " | ")
+                    .first?
+                    .trimmingCharacters(in: .whitespaces) ?? candidate
+                return !exclusions.contains(leading)
+            }
+            // Safe fallback: if every candidate was excluded, use the full set.
+            pool = filtered.isEmpty ? nonempty : filtered
+        } else {
+            pool = nonempty
+        }
+
         if !appHints.isEmpty {
-            if let preferred = nonempty.first(where: { c in appHints.contains { c.contains($0) } }) {
+            if let preferred = pool.first(where: { c in appHints.contains { c.contains($0) } }) {
                 return preferred
             }
         }
-        return nonempty.max(by: { $0.count < $1.count })
+        return pool.max(by: { $0.count < $1.count })
     }
 
     // MARK: - YAML scalar escaping
