@@ -78,6 +78,7 @@ final class AppModel {
     @ObservationIgnored private let assetManager = SpeechAssetManager()
     @ObservationIgnored private let localeBox = LocaleBox()
     @ObservationIgnored private let vocabularyBox = VocabularyBox()
+    @ObservationIgnored private let contextBox = MeetingContextBox()
     @ObservationIgnored private var progressTask: Task<Void, Never>?
 
     // MARK: Auto-start detector (not observed)
@@ -91,9 +92,8 @@ final class AppModel {
     @ObservationIgnored private var autoStartedTarget: CaptureTarget?
 
     init() {
-        let initialName = "Meeting"
-        session = AppModel.makeSession(meetingName: initialName, localeBox: localeBox, vocabularyBox: vocabularyBox)
-        meetingName = initialName
+        session = AppModel.makeSession(localeBox: localeBox, vocabularyBox: vocabularyBox, contextBox: contextBox)
+        meetingName = "Meeting"
         // Read current permission status (no prompts) so the menu reflects what
         // still needs granting before the first Start.
         permissions.refresh()
@@ -119,7 +119,7 @@ final class AppModel {
     /// - opens a `TranscriptWriter` under `~/Documents/Alembic/`, and
     /// - anchors the session clock origin on the same monotonic host-time basis
     ///   the source uses (`HostClock.now()`), so engine/source times align.
-    private static func makeSession(meetingName: String, localeBox: LocaleBox, vocabularyBox: VocabularyBox) -> MeetingSession {
+    private static func makeSession(localeBox: LocaleBox, vocabularyBox: VocabularyBox, contextBox: MeetingContextBox) -> MeetingSession {
         let source = ScreenCaptureKitSource()
 
         // Map CaptureSourceError -> String for the platform-neutral orchestrator.
@@ -144,7 +144,7 @@ final class AppModel {
         }
 
         let makeWriter: @Sendable () throws -> TranscriptWriter = {
-            try TranscriptWriter(meetingName: meetingName, writeReadableRender: true)
+            try TranscriptWriter(context: contextBox.context, writeReadableRender: true)
         }
 
         return MeetingSession(
@@ -195,7 +195,7 @@ final class AppModel {
         startupBlocker = nil
 
         if AppModel.isTerminal(session.state) {
-            session = AppModel.makeSession(meetingName: meetingName, localeBox: localeBox, vocabularyBox: vocabularyBox)
+            session = AppModel.makeSession(localeBox: localeBox, vocabularyBox: vocabularyBox, contextBox: contextBox)
             await refreshTargets()
         }
 
@@ -221,7 +221,6 @@ final class AppModel {
             return
         }
 
-        isPreparingModels = false
         progressTask?.cancel()
 
         // Load vocabulary off the main actor (file I/O may be slow for large folders).
@@ -234,7 +233,24 @@ final class AppModel {
               "from \(sourceCount) source\(sourceCount == 1 ? "" : "s")" +
               "\(vocabResult.truncated ? " (truncated)" : "")")
 
+        // Assemble meeting context off the main actor (CGWindowList can block).
+        // isPreparingModels stays true until the context is published so a second
+        // start() invocation cannot interleave while the session is still idle.
+        let appHints = MeetingAppCatalog.match(bundleID: target.id)?.app.titleHints ?? []
+        let windowTitle = await Task.detached(priority: .userInitiated) {
+            WindowTitleProbe.fullTitle(forBundleID: target.id, appHints: appHints)
+        }.value
+        let ctx = MeetingContext(
+            windowTitle: windowTitle,
+            appDisplayName: target.displayName,
+            bundleID: target.id,
+            localeIdentifier: localeBox.locale.identifier,
+            startDate: Date()
+        )
+        contextBox.set(ctx)
+
         await session.start(target: target)
+        isPreparingModels = false
     }
 
     /// Maps a speech-asset preflight error onto an actionable ``StartupBlocker``.
@@ -462,6 +478,26 @@ final class VocabularyBox: @unchecked Sendable {
     }
 
     func set(_ newValue: [String]) {
+        lock.lock(); value = newValue; lock.unlock()
+    }
+}
+
+/// Thread-safe, `Sendable` holder for the session-start meeting context.
+///
+/// Follows the same bridge pattern as `LocaleBox` and `VocabularyBox`:
+/// `AppModel.start` assembles the context off-actor and stores it here
+/// **before** `session.start`, so the `@Sendable` `makeWriter` factory reads
+/// the published context synchronously when the session opens its transcript.
+final class MeetingContextBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: MeetingContext = MeetingContext()
+
+    var context: MeetingContext {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func set(_ newValue: MeetingContext) {
         lock.lock(); value = newValue; lock.unlock()
     }
 }

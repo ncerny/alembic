@@ -56,6 +56,54 @@ public actor TranscriptWriter {
 
     // MARK: - Initialization
 
+    /// Opens (creating as needed) the canonical transcript file for a session,
+    /// using a `MeetingContext` for file naming and `.md` frontmatter.
+    ///
+    /// - Parameters:
+    ///   - context: Session metadata used for the file name and `.md` frontmatter.
+    ///   - directory: Output directory. Defaults to `~/Documents/Alembic/`.
+    ///     Created if missing.
+    ///   - date: Session start used for the `<yyyy-MM-dd_HHmm>` file-name stamp.
+    ///     Defaults to `context.startDate`. Injectable for deterministic tests.
+    ///   - writeReadableRender: When `true`, also opens a sibling `.md` file,
+    ///     writes the YAML frontmatter block, and mirrors each finalized segment
+    ///     as `[hh:mm:ss] source: text`.
+    public init(
+        context: MeetingContext,
+        directory: URL? = nil,
+        date: Date? = nil,
+        writeReadableRender: Bool = false
+    ) throws {
+        let resolvedDate = date ?? context.startDate
+        let dir = directory ?? TranscriptWriter.defaultDirectory
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let base = TranscriptWriter.fileBaseName(meetingName: context.nameForFile, date: resolvedDate)
+        let jsonlURL = dir.appendingPathComponent(base + ".jsonl")
+        self.outputURL = jsonlURL
+
+        FileManager.default.createFile(atPath: jsonlURL.path, contents: nil)
+        self.jsonlHandle = try FileHandle(forWritingTo: jsonlURL)
+
+        if writeReadableRender {
+            let mdURL = dir.appendingPathComponent(base + ".md")
+            self.readableURL = mdURL
+            FileManager.default.createFile(atPath: mdURL.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: mdURL)
+            // Write frontmatter + blank separator line before any segment lines.
+            let frontmatter = context.yamlFrontmatter() + "\n"
+            try handle.write(contentsOf: Data(frontmatter.utf8))
+            self.readableHandle = handle
+        } else {
+            self.readableURL = nil
+            self.readableHandle = nil
+        }
+
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.sortedKeys]
+        self.encoder = enc
+    }
+
     /// Opens (creating as needed) the canonical transcript file for a session.
     ///
     /// - Parameters:
@@ -73,30 +121,12 @@ public actor TranscriptWriter {
         date: Date = Date(),
         writeReadableRender: Bool = false
     ) throws {
-        let dir = directory ?? TranscriptWriter.defaultDirectory
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-
-        let base = TranscriptWriter.fileBaseName(meetingName: meetingName, date: date)
-        let jsonlURL = dir.appendingPathComponent(base + ".jsonl")
-        self.outputURL = jsonlURL
-
-        FileManager.default.createFile(atPath: jsonlURL.path, contents: nil)
-        self.jsonlHandle = try FileHandle(forWritingTo: jsonlURL)
-
-        if writeReadableRender {
-            let mdURL = dir.appendingPathComponent(base + ".md")
-            self.readableURL = mdURL
-            FileManager.default.createFile(atPath: mdURL.path, contents: nil)
-            self.readableHandle = try FileHandle(forWritingTo: mdURL)
-        } else {
-            self.readableURL = nil
-            self.readableHandle = nil
-        }
-
-        let enc = JSONEncoder()
-        // Deterministic key order → stable, diffable, testable output.
-        enc.outputFormatting = [.sortedKeys]
-        self.encoder = enc
+        try self.init(
+            context: MeetingContext(windowTitle: meetingName, startDate: date),
+            directory: directory,
+            date: date,
+            writeReadableRender: writeReadableRender
+        )
     }
 
     // MARK: - Appending
@@ -186,8 +216,9 @@ public actor TranscriptWriter {
     }
 
     /// Makes a meeting name safe for use as a single file-name component:
-    /// strips path separators and other reserved/troublesome characters and
-    /// collapses whitespace runs into single hyphens.
+    /// strips path separators and other reserved/troublesome characters,
+    /// collapses whitespace runs into single hyphens, and collapses consecutive
+    /// hyphens into one (so `"CI Agent - DSU"` → `CI-Agent-DSU`).
     static func sanitize(_ name: String) -> String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         // Disallow path separators, the NUL, and a few characters that are
@@ -199,7 +230,14 @@ public actor TranscriptWriter {
         ))
         // Collapse internal whitespace into single hyphens.
         let parts = cleaned.split(whereSeparator: { $0 == " " || $0 == "\t" })
-        return parts.joined(separator: "-")
+        let joined = parts.joined(separator: "-")
+        // Collapse consecutive hyphens and trim any leading/trailing hyphens so
+        // a title like "CI Agent - DSU" (which produces "CI-Agent---DSU" above)
+        // becomes the clean "CI-Agent-DSU".
+        return joined
+            .components(separatedBy: "-")
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
     }
 
     /// Renders a finalized segment as a human-readable line:
