@@ -29,7 +29,7 @@ struct AlembicApp: App {
         }
 
         Window("Alembic Settings", id: AppModel.settingsWindowID) {
-            SettingsView()
+            SettingsView(model: model)
         }
         .defaultSize(width: 540, height: 380)
     }
