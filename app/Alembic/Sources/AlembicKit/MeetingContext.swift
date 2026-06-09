@@ -109,15 +109,24 @@ public struct MeetingContext: Sendable {
     ///    the exclusion step is skipped and the full non-empty set is used so a
     ///    title is never lost.
     /// 2. The first remaining candidate whose text contains one of `appHints`.
-    /// 3. The longest remaining non-empty candidate.
+    /// 3. When `preferFrontmost` is `true`, the first remaining candidate
+    ///    (callers pass candidates in front-to-back z-order, so this is the
+    ///    frontmost window); otherwise the longest remaining candidate.
     /// 4. `nil` when `candidates` is empty or all are empty.
+    ///
+    /// `preferFrontmost` exists because a verbose hub page (e.g. a calendar
+    /// event detail page left open behind the call) can be *longer* than the
+    /// real meeting window's title. During a live meeting the meeting window is
+    /// frontmost, so taking the frontmost qualifying window picks the real
+    /// meeting name instead of the longest stray hub title.
     ///
     /// This function is pure and Foundation-only so it can be exercised by
     /// `AlembicCheck` without a live window server.
     public static func bestTitle(
         from candidates: [String],
         appHints: [String] = [],
-        exclusions: [String] = []
+        exclusions: [String] = [],
+        preferFrontmost: Bool = false
     ) -> String? {
         let nonempty = candidates.filter { !$0.isEmpty }
         guard !nonempty.isEmpty else { return nil }
@@ -142,6 +151,9 @@ public struct MeetingContext: Sendable {
             if let preferred = pool.first(where: { c in appHints.contains { c.contains($0) } }) {
                 return preferred
             }
+        }
+        if preferFrontmost {
+            return pool.first
         }
         return pool.max(by: { $0.count < $1.count })
     }

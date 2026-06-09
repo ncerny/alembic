@@ -52,7 +52,10 @@ public struct WindowTitleProbe: Sendable {
     ///    prefix or a dot-delimited child of it (covers Electron helper processes
     ///    that often own the titled window).
     /// 3. Finds all on-screen window titles owned by those PIDs.
-    /// 4. Delegates ranking to the pure `MeetingContext.bestTitle(from:appHints:)`.
+    /// 4. Delegates ranking to the pure `MeetingContext.bestTitle(from:appHints:)`,
+    ///    preferring the frontmost qualifying window (candidates are collected in
+    ///    front-to-back z-order) so a verbose hub page left open behind the call
+    ///    never shadows the real meeting window's title.
     /// 5. Strips any matching `trailingStrips` suffix (e.g. `" | Microsoft Teams"`).
     ///
     /// Uses the Screen Recording permission Alembic already holds; no new
@@ -89,16 +92,36 @@ public struct WindowTitleProbe: Sendable {
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] else { return nil }
 
+        // New Teams (and similar Electron apps) spawn tiny (~66x20) overlay
+        // helper windows titled "Window" alongside the real meeting/hub windows.
+        // Filter anything below a sane content-window floor so the frontmost
+        // heuristic never latches onto a meaningless overlay.
+        let minContentWidth: CGFloat = 200
+        let minContentHeight: CGFloat = 120
+
         var candidates: [String] = []
         for window in windowList {
             guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int32,
                   candidatePIDs.contains(ownerPID),
                   let title = window[kCGWindowName as String] as? String,
                   !title.isEmpty else { continue }
+            if let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
+               let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary),
+               rect.width < minContentWidth || rect.height < minContentHeight {
+                continue
+            }
             candidates.append(title)
         }
 
-        guard let raw = MeetingContext.bestTitle(from: candidates, appHints: appHints, exclusions: exclusions) else { return nil }
+        // `windowList` is front-to-back, so `candidates` preserves z-order and
+        // `preferFrontmost` selects the frontmost qualifying window — the live
+        // meeting window during a call — over a longer stray hub title behind it.
+        guard let raw = MeetingContext.bestTitle(
+            from: candidates,
+            appHints: appHints,
+            exclusions: exclusions,
+            preferFrontmost: true
+        ) else { return nil }
         return MeetingContext.applyTrailingStrips(to: raw, strips: trailingStrips)
     }
 }
