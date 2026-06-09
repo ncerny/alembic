@@ -81,6 +81,25 @@ public struct MeetingContext: Sendable {
 
     // MARK: - Title selection (pure, CLT-testable)
 
+    /// Strips a known app-name suffix from a window title.
+    ///
+    /// Many Electron apps (Teams, Slack) append the app name to every window
+    /// title — e.g. `"Standup | Microsoft Teams"`. Stripping it produces a clean
+    /// meeting name for transcript file names and YAML frontmatter.
+    ///
+    /// Only the first matching suffix in `strips` is removed. If the result
+    /// would be empty the original title is returned unchanged.
+    public static func applyTrailingStrips(to title: String, strips: [String]) -> String {
+        for strip in strips {
+            if title.hasSuffix(strip) {
+                let stripped = title.dropLast(strip.count)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return stripped.isEmpty ? title : stripped
+            }
+        }
+        return title
+    }
+
     /// Picks the best window title from a set of candidates.
     ///
     /// Selection rules (in priority order):

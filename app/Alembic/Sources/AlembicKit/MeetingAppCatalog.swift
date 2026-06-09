@@ -42,13 +42,25 @@ public struct MeetingApp: Sendable, Equatable {
     /// candidates so a title is never lost.
     public let nonMeetingTitlePrefixes: [String]
 
+    /// Suffixes to strip from the end of the selected window title before using
+    /// it as a meeting name (e.g. `" | Microsoft Teams"`).
+    ///
+    /// Many Electron apps append the app name to every window title. Stripping
+    /// it produces a clean meeting name in transcript file names and YAML
+    /// frontmatter (e.g. `"Standup | Microsoft Teams"` → `"Standup"`).
+    /// Applied after `bestTitle` ranking; only the first matching suffix is
+    /// stripped. If stripping would leave an empty string the original title is
+    /// kept unchanged.
+    public let titleTrailingStrips: [String]
+
     public init(
         displayName: String,
         bundlePrefixes: [String],
         requiresOutput: Bool = false,
         requiresTitleConfirmation: Bool = false,
         titleHints: [String] = [],
-        nonMeetingTitlePrefixes: [String] = []
+        nonMeetingTitlePrefixes: [String] = [],
+        titleTrailingStrips: [String] = []
     ) {
         self.displayName = displayName
         self.bundlePrefixes = bundlePrefixes
@@ -56,6 +68,7 @@ public struct MeetingApp: Sendable, Equatable {
         self.requiresTitleConfirmation = requiresTitleConfirmation
         self.titleHints = titleHints
         self.nonMeetingTitlePrefixes = nonMeetingTitlePrefixes
+        self.titleTrailingStrips = titleTrailingStrips
     }
 }
 
@@ -131,7 +144,8 @@ public enum MeetingAppCatalog {
             nonMeetingTitlePrefixes: [
                 "Chat", "Activity", "Calendar", "Calls",
                 "Teams and Channels", "Files", "Microsoft Teams",
-            ]
+            ],
+            titleTrailingStrips: [" | Microsoft Teams"]
         ),
         MeetingApp(
             displayName: "Zoom",
