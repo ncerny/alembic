@@ -1956,6 +1956,33 @@ struct AlembicCheck {
             s.expectEqual(result, "test call",
                           "frontmost meeting window selected, then Teams suffix stripped")
         }
+
+        s.check("bestTitle + applyTrailingStrips: 1:1 call picks call window over compact-view overlay and stray hub page") { s in
+            // Real-world capture during a 1:1 call: a "Meeting compact view" PiP
+            // overlay is frontmost, the real call window is behind it, and a stray
+            // "PGS …" hub detail page is further back. The compact-view chrome must
+            // be excluded so the actual call window wins, not the hub page.
+            let raw = MeetingContext.bestTitle(
+                from: [
+                    "Meeting compact view | +1 913-712-6167 | Microsoft Teams",
+                    "+1 913-712-6167 | Microsoft Teams",
+                    "Calls | Microsoft Teams",
+                    "PGS Agentic AI Foundations Program Workshop | Microsoft Teams",
+                ],
+                appHints: [],
+                exclusions: MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.nonMeetingTitlePrefixes ?? [],
+                preferFrontmost: true
+            )
+            let strips = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.titleTrailingStrips ?? []
+            let result = raw.map { MeetingContext.applyTrailingStrips(to: $0, strips: strips) }
+            s.expectEqual(result, "+1 913-712-6167",
+                          "compact-view overlay excluded, real call window selected")
+        }
+
+        s.check("Teams catalog excludes Meeting compact view overlay") { s in
+            let prefixes = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.nonMeetingTitlePrefixes ?? []
+            s.expect(prefixes.contains("Meeting compact view"), "Meeting compact view in Teams exclusions")
+        }
     }
 
     // MARK: - Foundation-only top-level AlembicKit audit
