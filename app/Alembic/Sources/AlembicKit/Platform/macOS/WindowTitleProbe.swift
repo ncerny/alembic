@@ -53,10 +53,11 @@ public struct WindowTitleProbe: Sendable {
     ///    that often own the titled window).
     /// 3. Finds all on-screen window titles owned by those PIDs.
     /// 4. Delegates ranking to the pure `MeetingContext.bestTitle(from:appHints:)`.
+    /// 5. Strips any matching `trailingStrips` suffix (e.g. `" | Microsoft Teams"`).
     ///
     /// Uses the Screen Recording permission Alembic already holds; no new
     /// permission is required.
-    public static func fullTitle(forBundleID bundleID: String, appHints: [String] = [], exclusions: [String] = []) -> String? {
+    public static func fullTitle(forBundleID bundleID: String, appHints: [String] = [], exclusions: [String] = [], trailingStrips: [String] = []) -> String? {
         var candidatePIDs: Set<Int32> = []
 
         // If the id is a raw PID reference (e.g. "pid:1234"), use it directly.
@@ -97,6 +98,7 @@ public struct WindowTitleProbe: Sendable {
             candidates.append(title)
         }
 
-        return MeetingContext.bestTitle(from: candidates, appHints: appHints, exclusions: exclusions)
+        guard let raw = MeetingContext.bestTitle(from: candidates, appHints: appHints, exclusions: exclusions) else { return nil }
+        return MeetingContext.applyTrailingStrips(to: raw, strips: trailingStrips)
     }
 }

@@ -1772,6 +1772,46 @@ struct AlembicCheck {
             s.expect(result.contains("\\u001F"), "US → \\u001F")
             s.expect(result.contains("\\u007F"), "DEL → \\u007F")
         }
+
+        s.check("MeetingContext applyTrailingStrips: strips matching suffix") { s in
+            s.expectEqual(
+                MeetingContext.applyTrailingStrips(to: "Standup | Microsoft Teams", strips: [" | Microsoft Teams"]),
+                "Standup",
+                "trailing app-name suffix stripped"
+            )
+        }
+
+        s.check("MeetingContext applyTrailingStrips: no match leaves title unchanged") { s in
+            s.expectEqual(
+                MeetingContext.applyTrailingStrips(to: "Standup | Zoom", strips: [" | Microsoft Teams"]),
+                "Standup | Zoom",
+                "no matching suffix → unchanged"
+            )
+        }
+
+        s.check("MeetingContext applyTrailingStrips: empty strips → unchanged") { s in
+            s.expectEqual(
+                MeetingContext.applyTrailingStrips(to: "Any Title | Microsoft Teams", strips: []),
+                "Any Title | Microsoft Teams",
+                "empty strips → unchanged"
+            )
+        }
+
+        s.check("MeetingContext applyTrailingStrips: stripping to empty keeps original") { s in
+            s.expectEqual(
+                MeetingContext.applyTrailingStrips(to: " | Microsoft Teams", strips: [" | Microsoft Teams"]),
+                " | Microsoft Teams",
+                "would-be-empty result keeps original"
+            )
+        }
+
+        s.check("MeetingContext applyTrailingStrips: trims whitespace after strip") { s in
+            s.expectEqual(
+                MeetingContext.applyTrailingStrips(to: "Weekly Review  | Microsoft Teams", strips: ["| Microsoft Teams"]),
+                "Weekly Review",
+                "trailing whitespace trimmed after strip"
+            )
+        }
     }
 
     static func checkBestTitle(_ s: CheckSuite) {
@@ -1866,6 +1906,27 @@ struct AlembicCheck {
             s.expect(prefixes.contains("Files"), "Files in Teams exclusions")
             s.expect(prefixes.contains("Teams and Channels"), "Teams and Channels in Teams exclusions")
             s.expect(prefixes.contains("Microsoft Teams"), "Microsoft Teams in Teams exclusions")
+        }
+
+        s.check("Teams catalog entry has titleTrailingStrips seeded") { s in
+            let strips = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.titleTrailingStrips ?? []
+            s.expect(strips.contains(" | Microsoft Teams"), "| Microsoft Teams in Teams trailing strips")
+        }
+
+        s.check("bestTitle + applyTrailingStrips: Teams full-pipeline produces clean meeting name") { s in
+            // Simulate the two-step pipeline used in WindowTitleProbe.fullTitle.
+            let raw = MeetingContext.bestTitle(
+                from: [
+                    "Chat | Alice | Microsoft Teams",
+                    "PGS Agentic AI Foundations Program Workshop | Microsoft Teams",
+                ],
+                appHints: [],
+                exclusions: MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.nonMeetingTitlePrefixes ?? []
+            )
+            let strips = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.titleTrailingStrips ?? []
+            let result = raw.map { MeetingContext.applyTrailingStrips(to: $0, strips: strips) }
+            s.expectEqual(result, "PGS Agentic AI Foundations Program Workshop",
+                          "meeting title selected, then Teams suffix stripped")
         }
     }
 

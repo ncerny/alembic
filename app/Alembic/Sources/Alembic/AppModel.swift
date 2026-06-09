@@ -238,8 +238,9 @@ final class AppModel {
         // start() invocation cannot interleave while the session is still idle.
         let appHints = MeetingAppCatalog.match(bundleID: target.id)?.app.titleHints ?? []
         let exclusions = MeetingAppCatalog.match(bundleID: target.id)?.app.nonMeetingTitlePrefixes ?? []
+        let trailingStrips = MeetingAppCatalog.match(bundleID: target.id)?.app.titleTrailingStrips ?? []
         let windowTitle = await Task.detached(priority: .userInitiated) {
-            WindowTitleProbe.fullTitle(forBundleID: target.id, appHints: appHints, exclusions: exclusions)
+            WindowTitleProbe.fullTitle(forBundleID: target.id, appHints: appHints, exclusions: exclusions, trailingStrips: trailingStrips)
         }.value
         let ctx = MeetingContext(
             windowTitle: windowTitle,

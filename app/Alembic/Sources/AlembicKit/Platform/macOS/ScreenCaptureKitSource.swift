@@ -130,11 +130,11 @@ public actor ScreenCaptureKitSource: AudioSource {
         guard !didStop, stream == nil else { return }
 
         // NOTE (minimized-Teams / no-frames): ScreenCaptureKit only renders
-        // frames for windows that are actually on-screen. A minimized or hidden
-        // meeting window may deliver no *video* frames. This only matters for a
-        // future video path — per-app **audio** is still captured regardless of
-        // window visibility, so transcription is unaffected here. Surfaced to the
-        // user as a UI hint in the permissions/onboarding flow.
+        // video frames for windows that are actually on-screen. A minimized or
+        // hidden meeting window may deliver no *video* frames — irrelevant for
+        // audio transcription. The display used in the content filter is chosen
+        // based on where the app's windows live (see below) to satisfy macOS 26's
+        // requirement that the filter's display and app windows overlap.
         try await CapturePreflight.requireForCapture()
 
         // Single session origin shared by both pipelines.
@@ -145,9 +145,21 @@ public actor ScreenCaptureKitSource: AudioSource {
         guard let app = content.applications.first(where: { Self.matches(target, $0) }) else {
             throw CaptureSourceError.targetNotFound(target.id)
         }
-        guard let display = content.displays.first else {
+        guard !content.displays.isEmpty else {
             throw CaptureSourceError.noDisplay
         }
+
+        // macOS 26: SCContentFilter(display:including:exceptingWindows:) requires at
+        // least one window from the app on the specified display. Pick the display that
+        // contains one of the app's windows so the filter is never empty — this prevents
+        // an immediate "Failed to find any displays or windows to capture" stream error
+        // when the app window lives on a secondary display. Falls back to the first
+        // display when the app has no enumerated windows (e.g. hidden/minimised).
+        let appPID = app.processID
+        let appWindows = content.windows.filter { $0.owningApplication?.processID == appPID }
+        let display: SCDisplay = appWindows.lazy
+            .compactMap { w in content.displays.first { $0.frame.intersects(w.frame) } }
+            .first ?? content.displays[0]
 
         let config = SCStreamConfiguration()
         config.capturesAudio = true
