@@ -144,6 +144,10 @@ public enum MeetingAppCatalog {
             nonMeetingTitlePrefixes: [
                 "Chat", "Activity", "Calendar", "Calls",
                 "Teams and Channels", "Files", "Microsoft Teams",
+                // Picture-in-picture call overlay; its leading segment is chrome
+                // ("Meeting compact view | <real name> | Microsoft Teams"), so it
+                // must be dropped in favour of the full call/meeting window.
+                "Meeting compact view",
             ],
             titleTrailingStrips: [" | Microsoft Teams"]
         ),
