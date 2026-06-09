@@ -1913,20 +1913,48 @@ struct AlembicCheck {
             s.expect(strips.contains(" | Microsoft Teams"), "| Microsoft Teams in Teams trailing strips")
         }
 
-        s.check("bestTitle + applyTrailingStrips: Teams full-pipeline produces clean meeting name") { s in
-            // Simulate the two-step pipeline used in WindowTitleProbe.fullTitle.
+        s.check("bestTitle: preferFrontmost selects first candidate over longest") { s in
+            let result = MeetingContext.bestTitle(
+                from: ["test call", "A much longer hub detail title"],
+                preferFrontmost: true
+            )
+            s.expectEqual(result, "test call", "frontmost wins over longer title")
+        }
+
+        s.check("bestTitle: preferFrontmost still applies exclusions before picking frontmost") { s in
+            // Frontmost is an excluded hub section; next frontmost is the meeting.
+            let result = MeetingContext.bestTitle(
+                from: [
+                    "Calendar | Microsoft Teams",
+                    "test call | Microsoft Teams",
+                    "PGS Agentic AI Foundations Program Workshop | Microsoft Teams",
+                ],
+                exclusions: ["Calendar", "Chat"],
+                preferFrontmost: true
+            )
+            s.expectEqual(result, "test call | Microsoft Teams",
+                          "excluded frontmost dropped, real meeting window selected")
+        }
+
+        s.check("bestTitle + applyTrailingStrips: live meeting window wins over verbose hub page") { s in
+            // Real-world capture: the live meeting window ("test call") is frontmost;
+            // a calendar event detail page left open in a hub window
+            // ("PGS Agentic AI Foundations Program Workshop") is longer but behind it.
+            // preferFrontmost must pick the meeting window, not the longest title.
             let raw = MeetingContext.bestTitle(
                 from: [
-                    "Chat | Alice | Microsoft Teams",
+                    "test call | Microsoft Teams",
+                    "Calendar | Microsoft Teams",
                     "PGS Agentic AI Foundations Program Workshop | Microsoft Teams",
                 ],
                 appHints: [],
-                exclusions: MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.nonMeetingTitlePrefixes ?? []
+                exclusions: MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.nonMeetingTitlePrefixes ?? [],
+                preferFrontmost: true
             )
             let strips = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.titleTrailingStrips ?? []
             let result = raw.map { MeetingContext.applyTrailingStrips(to: $0, strips: strips) }
-            s.expectEqual(result, "PGS Agentic AI Foundations Program Workshop",
-                          "meeting title selected, then Teams suffix stripped")
+            s.expectEqual(result, "test call",
+                          "frontmost meeting window selected, then Teams suffix stripped")
         }
     }
 
