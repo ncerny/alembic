@@ -1541,6 +1541,19 @@ struct AlembicCheck {
             s.expect(match?.app.displayName == "Zoom", "Zoom with output → detected")
         }
 
+        // --- Real live capture: Zoom main app (output) alongside us.zoom.caphost
+        // helper. caphost is a sibling bundle (not a child of us.zoom.xos) and
+        // must be ignored; the main app still yields a Zoom detection. ---
+        s.check("detectInCall: Zoom detected with us.zoom.caphost helper present") { s in
+            let states = [
+                state("us.zoom.caphost", input: false, output: false),
+                state("us.zoom.xos", input: true, output: true),
+            ]
+            let match = MeetingAppCatalog.detectInCall(processStates: states)
+            s.expectEqual(match?.canonicalBundlePrefix, "us.zoom.xos",
+                          "Zoom main app detected; caphost sibling ignored")
+        }
+
         // --- requiresOutput guard: Teams with input only → no detection ---
         s.check("detectInCall: requiresOutput blocks Teams input-only") { s in
             let states = [state("com.microsoft.teams2", input: true, output: false)]
