@@ -345,6 +345,16 @@ final class AppModel {
             }
             guard !isPreparingModels else { return }
 
+            // Re-enumerate capture targets before auto-starting. The launch-time
+            // target list is stale for any meeting app launched after Alembic
+            // (e.g. Zoom started later in the day), which previously caused the
+            // detection to fire but find no target and silently bail. Rebuild a
+            // terminal session first so enumeration runs against a live source.
+            if AppModel.isTerminal(session.state) {
+                session = AppModel.makeSession(localeBox: localeBox, vocabularyBox: vocabularyBox, contextBox: contextBox)
+            }
+            await refreshTargets()
+
             let prefix = d.canonicalBundlePrefix.lowercased()
             let target = session.availableTargets.first(where: { t in
                 let id = t.id.lowercased()
