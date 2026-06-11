@@ -43,7 +43,8 @@ public struct MeetingDetectionPolicy: Sendable {
     public let startDebounce: TimeInterval
 
     /// Seconds of sustained no-call signal required before transitioning
-    /// `ending → idle`. Default: 8 seconds.
+    /// `ending → idle`. Kept short so back-to-back meetings are detected as
+    /// separate sessions rather than merged into one. Default: 3 seconds.
     public let endDebounce: TimeInterval
 
     /// Current phase of the state machine.
@@ -54,7 +55,7 @@ public struct MeetingDetectionPolicy: Sendable {
 
     public init(
         startDebounce: TimeInterval = 4.0,
-        endDebounce: TimeInterval = 8.0
+        endDebounce: TimeInterval = 3.0
     ) {
         self.startDebounce = startDebounce
         self.endDebounce = endDebounce

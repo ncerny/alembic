@@ -61,7 +61,7 @@ public final class MeetingDetector: @unchecked Sendable {
         nowProvider: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         titleProbe: (@Sendable ([AudioProcessState]) -> Set<String>)? = nil,
         policy: MeetingDetectionPolicy = MeetingDetectionPolicy(),
-        safetyPollInterval: TimeInterval = 12.0
+        safetyPollInterval: TimeInterval = 3.0
     ) {
         self.snapshotProvider = snapshotProvider
         self.nowProvider = nowProvider
