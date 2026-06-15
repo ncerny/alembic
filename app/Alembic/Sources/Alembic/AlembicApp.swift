@@ -14,10 +14,12 @@ struct AlembicApp: App {
     @State private var model = AppModel()
 
     var body: some Scene {
-        MenuBarExtra {
+        // Use the `(_:systemImage:)` initializer rather than a `label:` closure
+        // containing an `Image`. The closure form has a long-standing SwiftUI bug
+        // (FB11829530) where the menu-bar icon renders blank/invisible for some
+        // users; the `systemImage:` initializer is the reliable form.
+        MenuBarExtra("Alembic", systemImage: model.menuBarSymbol) {
             AlembicMenu(model: model)
-        } label: {
-            Image(systemName: model.menuBarSymbol)
         }
         // `.menu` style renders a standard pull-down menu from the menu-bar item.
         .menuBarExtraStyle(.menu)
