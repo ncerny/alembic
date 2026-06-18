@@ -80,6 +80,12 @@ final class AppModel {
     @ObservationIgnored private let vocabularyBox = VocabularyBox()
     @ObservationIgnored private let contextBox = MeetingContextBox()
     @ObservationIgnored private var progressTask: Task<Void, Never>?
+    @ObservationIgnored private let teamsChatPoster = TeamsChatPoster()
+
+    /// User-facing status of the most recent transcription-disclosure attempt
+    /// (posted / staged to clipboard / skipped / failed), or `nil` when none has
+    /// run this launch. Surfaced in the menu so the outcome is never silent.
+    private(set) var disclosureStatus: String?
 
     // MARK: Auto-start detector (not observed)
 
@@ -253,6 +259,48 @@ final class AppModel {
 
         await session.start(target: target)
         isPreparingModels = false
+        // Fire-and-forget: the disclosure poster retries for several seconds
+        // while the meeting UI settles, so it must not block start()'s caller
+        // (the detection handler) — otherwise back-to-back meeting transitions
+        // would stall behind it.
+        Task { await maybeDisclose(target: target, meetingTitle: windowTitle) }
+    }
+
+    /// Reads the current disclosure configuration from `UserDefaults`.
+    private static func disclosureConfig() -> DisclosurePolicy.Config {
+        let d = UserDefaults.standard
+        let stored = d.string(forKey: DisclosurePolicy.DefaultsKey.message) ?? ""
+        // teamsOnly defaults to true when the user has never set it.
+        let teamsOnly = d.object(forKey: DisclosurePolicy.DefaultsKey.teamsOnly) == nil
+            ? true
+            : d.bool(forKey: DisclosurePolicy.DefaultsKey.teamsOnly)
+        return DisclosurePolicy.Config(
+            enabled: d.bool(forKey: DisclosurePolicy.DefaultsKey.enabled),
+            message: stored.isEmpty ? DisclosurePolicy.defaultMessage : stored,
+            autoSend: d.bool(forKey: DisclosurePolicy.DefaultsKey.autoSend),
+            teamsOnly: teamsOnly
+        )
+    }
+
+    /// Posts (or stages) the one-time transcription disclosure for the session
+    /// that just started, per `DisclosurePolicy`. Runs once per start; the
+    /// outcome is published to ``disclosureStatus`` and never silently dropped.
+    private func maybeDisclose(target: CaptureTarget, meetingTitle: String?) async {
+        let config = AppModel.disclosureConfig()
+        let isTeams = target.id.lowercased().hasPrefix("com.microsoft.teams")
+
+        switch DisclosurePolicy.decide(config: config, isTeams: isTeams, alreadyPosted: false) {
+        case .skip(let reason):
+            disclosureStatus = DisclosurePolicy.Result.skipped(reason: reason).statusMessage
+        case .stageToClipboard:
+            let text = DisclosurePolicy.renderMessage(template: config.message, meetingTitle: meetingTitle)
+            TeamsChatPoster.copyToClipboard(text)
+            disclosureStatus = DisclosurePolicy.Result.stagedToClipboard.statusMessage
+        case .post:
+            let text = DisclosurePolicy.renderMessage(template: config.message, meetingTitle: meetingTitle)
+            let result = await teamsChatPoster.post(text, meetingTitle: meetingTitle)
+            disclosureStatus = result.statusMessage
+        }
     }
 
     /// Maps a speech-asset preflight error onto an actionable ``StartupBlocker``.
@@ -281,6 +329,21 @@ final class AppModel {
     func revealTranscript() {
         guard let url = session.outputURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    // MARK: - Disclosure (Accessibility capability)
+
+    /// Whether Alembic is currently trusted for Accessibility, required only for
+    /// the disclosure *auto-post* path (never for recording).
+    var isAccessibilityTrusted: Bool { AccessibilityAuthorization.isTrusted() }
+
+    /// Prompts for Accessibility trust (used by the disclosure settings).
+    func requestAccessibilityTrust() { AccessibilityAuthorization.requestTrust() }
+
+    /// Opens the Accessibility pane in System Settings.
+    func openAccessibilitySettings() {
+        guard let url = URL(string: AccessibilityAuthorization.settingsURLString) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: - Auto-start

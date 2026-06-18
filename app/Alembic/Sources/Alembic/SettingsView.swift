@@ -16,6 +16,11 @@ struct SettingsView: View {
     @State private var previewResult: VocabularyStore.SourceLoadResult?
     @State private var isPreviewing = false
     @AppStorage("alembic.autostart.enabled") private var autoStartEnabled = false
+    @AppStorage(DisclosurePolicy.DefaultsKey.enabled) private var discloseEnabled = false
+    @AppStorage(DisclosurePolicy.DefaultsKey.autoSend) private var discloseAutoSend = false
+    @AppStorage(DisclosurePolicy.DefaultsKey.teamsOnly) private var discloseTeamsOnly = true
+    @AppStorage(DisclosurePolicy.DefaultsKey.message) private var discloseMessage = DisclosurePolicy.defaultMessage
+    @State private var accessibilityTrusted = false
 
     init(model: AppModel) {
         self.model = model
@@ -92,6 +97,56 @@ struct SettingsView: View {
                         .font(.headline)
                         .padding(.bottom, 4)
                 }
+
+                Section {
+                    Toggle("Post a transcription notice to the meeting chat", isOn: $discloseEnabled)
+
+                    if discloseEnabled {
+                        TextField(
+                            "Notice",
+                            text: $discloseMessage,
+                            prompt: Text(DisclosurePolicy.defaultMessage),
+                            axis: .vertical
+                        )
+                        .labelsHidden()
+                        .lineLimit(2...5)
+                        .textFieldStyle(.roundedBorder)
+
+                        Text("Use {meeting} to insert the detected meeting title.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Toggle("Only for Microsoft Teams", isOn: $discloseTeamsOnly)
+
+                        Toggle("Send automatically (otherwise copy to clipboard to paste)",
+                               isOn: $discloseAutoSend)
+
+                        if discloseAutoSend {
+                            HStack(spacing: 8) {
+                                Image(systemName: accessibilityTrusted
+                                      ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                    .foregroundStyle(accessibilityTrusted ? .green : .orange)
+                                Text(accessibilityTrusted
+                                     ? "Accessibility enabled — Alembic can post into the chat."
+                                     : "Automatic posting needs Accessibility permission.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                if !accessibilityTrusted {
+                                    Button("Grant…") {
+                                        model.requestAccessibilityTrust()
+                                        accessibilityTrusted = model.isAccessibilityTrusted
+                                    }
+                                    Button("Settings") { model.openAccessibilitySettings() }
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Meeting Disclosure")
+                        .font(.headline)
+                        .padding(.bottom, 4)
+                }
             }
             .formStyle(.grouped)
 
@@ -107,6 +162,7 @@ struct SettingsView: View {
             persist(newValue)
         }
         .onAppear {
+            accessibilityTrusted = model.isAccessibilityTrusted
             // Persist once after a legacy migration so source IDs stay stable
             // across launches instead of being re-derived from the old keys.
             let existing = UserDefaults.standard.string(forKey: VocabularyStore.sourcesDefaultsKey)
