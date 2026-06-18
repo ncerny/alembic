@@ -35,6 +35,7 @@ struct AlembicCheck {
         checkMeetingDetector(s)
         checkMeetingContext(s)
         checkBestTitle(s)
+        checkDisclosurePolicy(s)
         checkFoundationOnlyTopLevelAudit(s)
     }
 
@@ -2003,6 +2004,101 @@ struct AlembicCheck {
     /// Asserts that all `.swift` files directly under `Sources/AlembicKit/`
     /// (i.e. not in subdirectories) contain no imports of Apple platform
     /// frameworks. Those imports are only permitted under `Platform/macOS/`.
+    /// Locks the deterministic disclosure logic: the post/stage/skip decision
+    /// (enabled gate, once-per-session guard, Teams-only gate, autoSend routing),
+    /// message templating (placeholder substitution, whitespace collapse,
+    /// blank-template fallback, length cap), and the user-facing status strings.
+    /// The live Accessibility UI automation in `TeamsChatPoster` is a MANUAL gate.
+    static func checkDisclosurePolicy(_ s: CheckSuite) {
+        s.check("DisclosurePolicy.decide: disabled config always skips") { s in
+            let cfg = DisclosurePolicy.Config(enabled: false, autoSend: true)
+            s.expectEqual(
+                DisclosurePolicy.decide(config: cfg, isTeams: true, alreadyPosted: false),
+                .skip(reason: "disabled in settings"), "disabled ⇒ skip")
+        }
+
+        s.check("DisclosurePolicy.decide: once-per-session guard skips a second attempt") { s in
+            let cfg = DisclosurePolicy.Config(enabled: true, autoSend: true)
+            s.expectEqual(
+                DisclosurePolicy.decide(config: cfg, isTeams: true, alreadyPosted: true),
+                .skip(reason: "already disclosed this meeting"), "alreadyPosted ⇒ skip")
+        }
+
+        s.check("DisclosurePolicy.decide: teamsOnly gate skips non-Teams") { s in
+            let cfg = DisclosurePolicy.Config(enabled: true, autoSend: true, teamsOnly: true)
+            s.expectEqual(
+                DisclosurePolicy.decide(config: cfg, isTeams: false, alreadyPosted: false),
+                .skip(reason: "only supported for Microsoft Teams"), "non-Teams + teamsOnly ⇒ skip")
+            // With teamsOnly off, a non-Teams app proceeds.
+            let any = DisclosurePolicy.Config(enabled: true, autoSend: true, teamsOnly: false)
+            s.expectEqual(
+                DisclosurePolicy.decide(config: any, isTeams: false, alreadyPosted: false),
+                .post, "non-Teams + teamsOnly off ⇒ post")
+        }
+
+        s.check("DisclosurePolicy.decide: autoSend routes post vs clipboard") { s in
+            let auto = DisclosurePolicy.Config(enabled: true, autoSend: true)
+            s.expectEqual(
+                DisclosurePolicy.decide(config: auto, isTeams: true, alreadyPosted: false),
+                .post, "autoSend on ⇒ post")
+            let manual = DisclosurePolicy.Config(enabled: true, autoSend: false)
+            s.expectEqual(
+                DisclosurePolicy.decide(config: manual, isTeams: true, alreadyPosted: false),
+                .stageToClipboard, "autoSend off ⇒ stageToClipboard")
+        }
+
+        s.check("DisclosurePolicy.renderMessage: blank template falls back to default") { s in
+            s.expectEqual(
+                DisclosurePolicy.renderMessage(template: "   \n  "),
+                DisclosurePolicy.defaultMessage, "blank ⇒ default")
+            s.expectEqual(
+                DisclosurePolicy.renderMessage(template: ""),
+                DisclosurePolicy.defaultMessage, "empty ⇒ default")
+        }
+
+        s.check("DisclosurePolicy.renderMessage: collapses whitespace and newlines") { s in
+            let out = DisclosurePolicy.renderMessage(template: "Hi   there\n\nfolks\t!")
+            s.expectEqual(out, "Hi there folks !", "internal whitespace collapsed to single spaces")
+        }
+
+        s.check("DisclosurePolicy.renderMessage: substitutes the meeting placeholder") { s in
+            let withTitle = DisclosurePolicy.renderMessage(
+                template: "Transcribing {meeting} locally.", meetingTitle: "Weekly Sync")
+            s.expectEqual(withTitle, "Transcribing Weekly Sync locally.", "placeholder filled")
+            // No title ⇒ placeholder removed, surrounding whitespace collapsed.
+            let noTitle = DisclosurePolicy.renderMessage(
+                template: "Transcribing {meeting} locally.", meetingTitle: nil)
+            s.expectEqual(noTitle, "Transcribing locally.", "placeholder removed when no title")
+        }
+
+        s.check("DisclosurePolicy.renderMessage: caps length with ellipsis on a word boundary") { s in
+            let long = String(repeating: "word ", count: 200)
+            let out = DisclosurePolicy.renderMessage(template: long)
+            s.expect(out.count <= DisclosurePolicy.maxMessageLength, "respects maxMessageLength")
+            s.expect(out.hasSuffix("…"), "truncated output ends with ellipsis")
+            s.expect(!out.contains("  "), "no double spaces after truncation")
+        }
+
+        s.check("DisclosurePolicy.defaultMessage is workplace-appropriate") { s in
+            let m = DisclosurePolicy.defaultMessage
+            s.expect(m.contains("locally"), "states it is local")
+            s.expect(m.lowercased().contains("nothing is uploaded"), "states nothing is uploaded")
+            s.expect(!m.lowercased().contains("personal use only"),
+                     "avoids 'personal use only' phrasing")
+        }
+
+        s.check("DisclosurePolicy.Result: every outcome has a non-empty status") { s in
+            let results: [DisclosurePolicy.Result] = [
+                .posted, .stagedToClipboard, .skipped(reason: "disabled"), .failed(detail: "no chat"),
+            ]
+            for r in results {
+                s.expect(!r.statusMessage.isEmpty, "non-empty status for \(r)")
+            }
+            s.expect(DisclosurePolicy.Result.failed(detail: "no chat").statusMessage.contains("no chat"),
+                     "failure status includes detail")
+        }
+    }
+
     static func checkFoundationOnlyTopLevelAudit(_ s: CheckSuite) {
         let forbiddenFrameworks: [String] = [
             "AVFoundation", "CoreMedia", "ScreenCaptureKit", "Speech",
