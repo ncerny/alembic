@@ -25,6 +25,13 @@ struct AlembicCheck {
             await AXDumpProbe.run(arguments: Array(args.dropFirst(2)))
             return
         }
+        // An unrecognized subcommand must fail loudly, not silently run the
+        // suite (running a diagnostic from a branch that predates it would
+        // otherwise look like the diagnostic "passing" 700 checks).
+        if args.count >= 2 {
+            print("AlembicCheck: unknown subcommand \"\(args[1])\" — expected audio-watch or ax-dump, or no arguments for the check suite")
+            exit(64)  // EX_USAGE
+        }
 
         let suite = CheckSuite()
         await runAllChecks(suite)
