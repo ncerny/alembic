@@ -25,3 +25,6 @@ whisper/
 
 # Tracking
 .copilot-tracking/
+
+# Autonomous-session git worktrees
+.worktrees/
