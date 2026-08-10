@@ -11,13 +11,26 @@ import AlembicKit
 @main
 struct AlembicCheck {
     static func main() async {
-        // Live diagnostic mode: `swift run AlembicCheck audio-watch [seconds]`
-        // (see AudioWatchProbe). Everything else runs the check suite.
+        // Live diagnostic modes (everything else runs the check suite):
+        // - `swift run AlembicCheck audio-watch [seconds]`   (AudioWatchProbe)
+        // - `swift run AlembicCheck ax-dump [bundle-prefix] [--out path]
+        //    [--max-visits n]`                                (AXDumpProbe)
         let args = CommandLine.arguments
         if args.count >= 2, args[1] == "audio-watch" {
             let seconds = args.count >= 3 ? (Double(args[2]) ?? 60) : 60
             await AudioWatchProbe.run(seconds: seconds)
             return
+        }
+        if args.count >= 2, args[1] == "ax-dump" {
+            await AXDumpProbe.run(arguments: Array(args.dropFirst(2)))
+            return
+        }
+        // An unrecognized subcommand must fail loudly, not silently run the
+        // suite (running a diagnostic from a branch that predates it would
+        // otherwise look like the diagnostic "passing" 700 checks).
+        if args.count >= 2 {
+            print("AlembicCheck: unknown subcommand \"\(args[1])\" — expected audio-watch or ax-dump, or no arguments for the check suite")
+            exit(64)  // EX_USAGE
         }
 
         let suite = CheckSuite()
