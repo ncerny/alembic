@@ -128,9 +128,13 @@ public actor SpeechAnalyzerEngine: TranscriptionEngine {
         )
         self.inputBuilder = builder
 
+        // .utility: transcription may lag speech by a moment under load, but it
+        // must never compete with the live meeting app (or our UI) for CPU. Two
+        // engines run concurrently during every session, so their priority is a
+        // meaningful share of the machine.
         let analyzer = SpeechAnalyzer(
             modules: [transcriber],
-            options: SpeechAnalyzer.Options(priority: .userInitiated, modelRetention: .whileInUse)
+            options: SpeechAnalyzer.Options(priority: .utility, modelRetention: .whileInUse)
         )
         self.analyzer = analyzer
 
