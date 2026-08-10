@@ -105,9 +105,11 @@ public struct MeetingContext: Sendable {
     /// Selection rules (in priority order):
     /// 1. Drop any candidate whose leading ` | `-delimited segment (trimmed)
     ///    exactly matches an entry in `exclusions` (e.g. Teams hub sections
-    ///    like "Chat" or "Calendar"). If every non-empty candidate is excluded,
-    ///    the exclusion step is skipped and the full non-empty set is used so a
-    ///    title is never lost.
+    ///    like "Chat" or "Calendar"). When `exclusionFallback` is `true`
+    ///    (default) and every non-empty candidate is excluded, the exclusion
+    ///    step is skipped and the full non-empty set is used so a title is
+    ///    never lost. When `false`, all-excluded returns `nil` — the strict
+    ///    mode detection uses to ask "does a real meeting window exist?".
     /// 2. The first remaining candidate whose text contains one of `appHints`.
     /// 3. When `preferFrontmost` is `true`, the first remaining candidate
     ///    (callers pass candidates in front-to-back z-order, so this is the
@@ -126,7 +128,8 @@ public struct MeetingContext: Sendable {
         from candidates: [String],
         appHints: [String] = [],
         exclusions: [String] = [],
-        preferFrontmost: Bool = false
+        preferFrontmost: Bool = false,
+        exclusionFallback: Bool = true
     ) -> String? {
         let nonempty = candidates.filter { !$0.isEmpty }
         guard !nonempty.isEmpty else { return nil }
@@ -141,8 +144,14 @@ public struct MeetingContext: Sendable {
                     .trimmingCharacters(in: .whitespaces) ?? candidate
                 return !exclusions.contains(leading)
             }
-            // Safe fallback: if every candidate was excluded, use the full set.
-            pool = filtered.isEmpty ? nonempty : filtered
+            if filtered.isEmpty {
+                // Naming mode falls back so a title is never lost; strict
+                // (detection) mode reports that no meeting window exists.
+                guard exclusionFallback else { return nil }
+                pool = nonempty
+            } else {
+                pool = filtered
+            }
         } else {
             pool = nonempty
         }
