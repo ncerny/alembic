@@ -80,9 +80,10 @@ public struct MeetingChatMarkers: Sendable {
         self.composeHintSubstrings = composeHintSubstrings
     }
 
-    /// Validated against new Teams (`com.microsoft.teams2`) as of 2026-06.
-    /// NOTE: believed stale after a mid-2026 Teams UI update — re-derive with
-    /// ax-dump (see type docs) and update these values.
+    /// Re-verified against new Teams (`com.microsoft.teams2`) on 2026-08-10
+    /// via a live in-meeting ax-dump: all four markers present and exact.
+    /// The compose box is identified by its *description* ("Type a message");
+    /// it no longer exposes an AX placeholder attribute.
     public static let teamsDefaults = MeetingChatMarkers(
         paneMarkerButtonDescriptions: ["Close chat pane"],
         paneMarkerTitles: ["Meeting chat"],
@@ -190,6 +191,12 @@ public struct TeamsChatPoster: Sendable {
         // meeting janky.
         try? await Task.sleep(for: initialDelay)
 
+        // Bring Teams frontmost before scanning: opening the chat pane may
+        // need a synthesized physical click at the toggle's screen position
+        // (see openChatPane), which must land on a visible window.
+        activateTeams(bundlePrefix: bundlePrefix)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
         // Retry the scan: the meeting window, its "Chat" toggle, and the compose
         // box land in the AX tree only a moment after the call actually connects,
         // and the timing varies (especially if the user lingers on the "waiting
@@ -296,11 +303,9 @@ public struct TeamsChatPoster: Sendable {
             for window in candidates {
                 // Already open?
                 if let compose = composeBoxIfMeetingChat(in: window) { return compose }
-                // Closed → press the meeting "Chat" toggle in this window, wait,
-                // and re-scan.
-                if pressChatToggle(in: window) {
-                    usleep(600_000)
-                    if let compose = composeBoxIfMeetingChat(in: window) { return compose }
+                // Closed → open the pane via the meeting "Chat" toggle.
+                if openChatPane(in: window), let compose = composeBoxIfMeetingChat(in: window) {
+                    return compose
                 }
             }
         }
@@ -343,14 +348,65 @@ public struct TeamsChatPoster: Sendable {
         return lhs == rhs || lhs.hasPrefix(rhs + " |") || lhs.contains(rhs)
     }
 
-    /// Presses the meeting control-bar "Chat" toggle inside `window` to open the
-    /// chat pane. Matches an `AXButton` whose description is exactly "Chat"
-    /// (distinct from the hub's "Chat (⌘ 2)" / "Chat with Copilot"). Returns
-    /// whether a toggle was pressed.
-    @discardableResult
-    private func pressChatToggle(in window: AXUIElement) -> Bool {
+    /// Opens the in-meeting chat pane via the control-bar "Chat" toggle and
+    /// waits for it to mount. Returns `true` once the pane's compose box is
+    /// reachable.
+    ///
+    /// Layered activation, because Teams' post-2026 UI ignores the synthetic
+    /// `AXPress` on this node (ax-dump 2026-08-10 confirmed the toggle is
+    /// present, exact, and pressable — yet the pane never opened; Electron
+    /// wires the real click handler to a wrapper element):
+    /// 1. `AXPress` + poll up to 3 s for the pane to mount.
+    /// 2. Fall back to a synthesized physical mouse click at the toggle's
+    ///    screen-center + poll again. Requires Teams to be frontmost — the
+    ///    caller activates Teams before scanning.
+    private func openChatPane(in window: AXUIElement) -> Bool {
         guard let toggle = findChatToggle(in: window) else { return false }
-        return AXUIElementPerformAction(toggle, kAXPressAction as CFString) == .success
+
+        if AXUIElementPerformAction(toggle, kAXPressAction as CFString) == .success {
+            for _ in 0..<6 {
+                usleep(500_000)
+                if composeBoxIfMeetingChat(in: window) != nil { return true }
+            }
+        }
+
+        guard let rect = screenRect(of: toggle) else { return false }
+        clickAt(CGPoint(x: rect.midX, y: rect.midY))
+        for _ in 0..<6 {
+            usleep(500_000)
+            if composeBoxIfMeetingChat(in: window) != nil { return true }
+        }
+        return false
+    }
+
+    /// The element's global screen rect (CG top-left coordinate space), from
+    /// the AX position/size attributes.
+    private func screenRect(of element: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeRef) == .success else {
+            return nil
+        }
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        let posValue = unsafeDowncast(posRef as AnyObject, to: AXValue.self)
+        let sizeValue = unsafeDowncast(sizeRef as AnyObject, to: AXValue.self)
+        guard AXValueGetValue(posValue, .cgPoint, &point),
+              AXValueGetValue(sizeValue, .cgSize, &size),
+              size.width > 0, size.height > 0 else { return nil }
+        return CGRect(origin: point, size: size)
+    }
+
+    /// Synthesizes a physical left click at a global screen point (same CG
+    /// coordinate space the AX position attributes use).
+    private func clickAt(_ point: CGPoint) {
+        let source = CGEventSource(stateID: .combinedSessionState)
+        CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
+                mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+        usleep(30_000)
+        CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
+                mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
     }
 
     private func findChatToggle(in window: AXUIElement) -> AXUIElement? {
@@ -367,12 +423,20 @@ public struct TeamsChatPoster: Sendable {
     }
 
     private func isChatToggle(_ element: AXUIElement) -> Bool {
-        guard copyStringAttr(element, kAXRoleAttribute as String) == (kAXButtonRole as String) else {
+        // Electron sometimes exposes toolbar toggles as AXCheckBox.
+        let role = copyStringAttr(element, kAXRoleAttribute as String)
+        guard role == (kAXButtonRole as String) || role == (kAXCheckBoxRole as String) else {
             return false
         }
         guard let desc = copyStringAttr(element, kAXDescriptionAttribute as String) else { return false }
-        return markers.chatToggleDescriptions.contains {
-            desc.caseInsensitiveCompare($0) == .orderedSame
+        let lowered = desc.lowercased()
+        return markers.chatToggleDescriptions.contains { marker in
+            let m = marker.lowercased()
+            // Exact, or exact + a "," badge suffix (unread counts). A " ("
+            // suffix is deliberately NOT accepted: shortcut hints like
+            // "Chat (⌘ 2)" identify the HUB nav rail's buttons (confirmed by
+            // ax-dump 2026-08-10), never the in-meeting control bar's.
+            return lowered == m || lowered.hasPrefix(m + ",")
         }
     }
 
