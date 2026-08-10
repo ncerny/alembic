@@ -22,6 +22,23 @@ public struct WindowTitleProbe: Sendable {
         for apps: [MeetingApp],
         processStates: [AudioProcessState]
     ) -> Set<String> {
+        // Short-circuit before touching the window server: the detector calls
+        // this on every tick (3 s safety poll + every device wake-up), but the
+        // window list can only confirm anything when a process from one of these
+        // apps' bundle families is actually holding audio. detectInCall skips
+        // title-gated apps with no matching process anyway, so returning early
+        // never changes the outcome.
+        let anyRelevantProcess = processStates.contains { state in
+            let id = state.bundleID.lowercased()
+            return apps.contains { app in
+                app.bundlePrefixes.contains { prefix in
+                    let p = prefix.lowercased()
+                    return id == p || id.hasPrefix(p + ".")
+                }
+            }
+        }
+        guard anyRelevantProcess else { return [] }
+
         let activePIDs = Set(processStates.map { $0.pid })
         guard let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID

@@ -171,6 +171,12 @@ public actor ScreenCaptureKitSource: AudioSource {
         // but it will matter if a future phase adds video/OCR speaker attribution.
         config.width = 2
         config.height = 2
+        // Without a frame-interval cap, SCK asks WindowServer to composite the
+        // captured app at the display refresh rate for the whole meeting, purely
+        // to produce frames we discard. 1 fps keeps the capture-side cost
+        // negligible; audio delivery is unaffected.
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        config.showsCursor = false
 
         let filter = SCContentFilter(display: display, including: [app], exceptingWindows: [])
         let output = StreamAudioOutput(
@@ -180,7 +186,10 @@ public actor ScreenCaptureKitSource: AudioSource {
             errors: errorContinuation
         )
         let stream = SCStream(filter: filter, configuration: config, delegate: output)
-        try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue.global(qos: .userInteractive))
+        // .userInitiated is ample for 48 kHz audio chunks; .userInteractive made
+        // the callbacks compete with UI event handling (ours and the meeting
+        // app's) for the highest QoS band.
+        try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue.global(qos: .userInitiated))
         try await stream.startCapture()
         self.output = output
         self.stream = stream
