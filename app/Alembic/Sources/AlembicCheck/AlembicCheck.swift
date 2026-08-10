@@ -1932,21 +1932,50 @@ struct AlembicCheck {
             s.expect(ended == .some(.none) || (ended != nil && ended! == nil), "Teams-silent → session ended")
         }
 
-        // --- 7. Interactive session persists on output alone (mute-safe) ---
-        s.check("MeetingDetector tick: active interactive session persists while only output runs") { s in
+        // --- 7. Interactive end-of-call keys on input drop (fast end) ---
+        //
+        // Replays the 2026-08-10 audio-watch trace from a real Teams call:
+        // mute/unmute never touches the family's input state; hang-up drops
+        // modulehost input+output instantly while a helper then runs
+        // output-only for ~11.5 s (the end-call sound linger). The session
+        // must end endDebounce after the input drop — not after the linger —
+        // and the linger must not start a new (broadcast) detection.
+        s.check("MeetingDetector tick: hang-up input-drop ends the session; output linger extends nothing") { s in
+            func inCall() -> [AudioProcessState] {
+                [AudioProcessState(pid: 2645, bundleID: "com.microsoft.teams2.modulehost",
+                                   isRunningInput: true, isRunningOutput: true)]
+            }
+            func linger() -> [AudioProcessState] {
+                [AudioProcessState(pid: 2751, bundleID: "com.microsoft.teams2.helper",
+                                   isRunningInput: false, isRunningOutput: true)]
+            }
             let det = MeetingDetector(
                 snapshotProvider: { [] },
-                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+                policy: MeetingDetectionPolicy(startDebounce: 4, broadcastStartDebounce: 30, endDebounce: 3)
             )
-            _ = det.tick(snapshot: teams(), now: 0)
-            _ = det.tick(snapshot: teams(), now: 0)  // active
 
-            // Mic released (e.g. mute implementations that stop the input unit):
-            // far-end output alone keeps the session alive.
-            let outputOnly = [AudioProcessState(pid: 200, bundleID: "com.microsoft.teams2",
-                                                isRunningInput: false, isRunningOutput: true)]
-            let r = det.tick(snapshot: outputOnly, now: 5)
-            s.expect(r == nil, "output-only during active interactive session → still active")
+            // Join: confirm after the 4 s start debounce.
+            _ = det.tick(snapshot: inCall(), now: 0)
+            let started = det.tick(snapshot: inCall(), now: 4.5)
+            s.expect(started?.flatMap { $0 } != nil, "call active after start debounce")
+
+            // In-call ticks (mute/unmute cycles are invisible to CoreAudio).
+            s.expect(det.tick(snapshot: inCall(), now: 20) == nil, "stays active mid-call")
+
+            // Hang-up at t=33.4: input drops, helper linger begins.
+            s.expect(det.tick(snapshot: linger(), now: 33.4) == nil, "input drop → ending (no emission yet)")
+            let ended = det.tick(snapshot: linger(), now: 36.5)
+            guard let change = ended, change == nil else {
+                s.expect(false, "session ended ~3 s after hang-up despite output linger"); return
+            }
+
+            // Linger continues to ~44.8 s: broadcast evidence, but it dies
+            // long before the 30 s broadcast debounce → no new detection.
+            for t in stride(from: 37.5, through: 44.8, by: 1.0) {
+                s.expect(det.tick(snapshot: linger(), now: t) == nil, "linger never re-detects (t=\(t))")
+            }
+            s.expect(det.tick(snapshot: [], now: 45.4) == nil, "quiet after linger: still nothing")
+            s.expect(det.tick(snapshot: [], now: 60) == nil, "idle stays idle")
         }
 
         // --- 8. Broadcast tier: chime-style output needs title + long debounce ---
