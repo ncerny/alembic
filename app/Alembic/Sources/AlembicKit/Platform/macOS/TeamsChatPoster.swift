@@ -47,12 +47,64 @@ public enum AccessibilityAuthorization {
 /// > headlessly. The *decisions* around it (`DisclosurePolicy`) are unit-tested;
 /// > this path is validated by hand on a real Teams call. Every failure falls
 /// > back to the clipboard so the user can always paste manually.
+/// The AX-tree strings that identify the Teams in-meeting chat UI.
+///
+/// Microsoft moves these between Teams releases, so they are **data**, not
+/// code: when the poster stops finding the chat pane, run
+/// `swift run AlembicCheck ax-dump` during a live meeting (chat pane open),
+/// find the new markers in the dump, and update `teamsDefaults` — no search
+/// logic needs to change.
+public struct MeetingChatMarkers: Sendable {
+    /// `AXButton` descriptions that exist only inside the in-meeting chat pane
+    /// (compared case-insensitively, exact match).
+    public var paneMarkerButtonDescriptions: [String]
+    /// Element titles that exist only inside the in-meeting chat pane
+    /// (compared case-insensitively, exact match).
+    public var paneMarkerTitles: [String]
+    /// `AXButton` descriptions for the meeting control-bar Chat toggle
+    /// (exact, case-insensitive — distinct from the hub's "Chat (⌘ 2)").
+    public var chatToggleDescriptions: [String]
+    /// Lowercased substrings identifying the compose control via its
+    /// placeholder, description, or title.
+    public var composeHintSubstrings: [String]
+
+    public init(
+        paneMarkerButtonDescriptions: [String],
+        paneMarkerTitles: [String],
+        chatToggleDescriptions: [String],
+        composeHintSubstrings: [String]
+    ) {
+        self.paneMarkerButtonDescriptions = paneMarkerButtonDescriptions
+        self.paneMarkerTitles = paneMarkerTitles
+        self.chatToggleDescriptions = chatToggleDescriptions
+        self.composeHintSubstrings = composeHintSubstrings
+    }
+
+    /// Validated against new Teams (`com.microsoft.teams2`) as of 2026-06.
+    /// NOTE: believed stale after a mid-2026 Teams UI update — re-derive with
+    /// ax-dump (see type docs) and update these values.
+    public static let teamsDefaults = MeetingChatMarkers(
+        paneMarkerButtonDescriptions: ["Close chat pane"],
+        paneMarkerTitles: ["Meeting chat"],
+        chatToggleDescriptions: ["Chat"],
+        composeHintSubstrings: ["message"]
+    )
+}
+
 public struct TeamsChatPoster: Sendable {
 
     /// Max depth/visits for the bounded AX search, to keep it cheap and bounded
     /// even against a deep Electron WebArea tree.
     private let maxDepth: Int
     private let maxVisits: Int
+
+    /// The Teams-release-specific AX marker strings (injectable for updates).
+    private let markers: MeetingChatMarkers
+
+    /// Wait before the first AX scan. Meeting join is when Teams is busiest
+    /// (call setup, media negotiation) and when synchronous AX IPC into its
+    /// main thread hurts the most — let the call settle first.
+    private let initialDelay: Duration
 
     /// How many times to re-scan for the meeting chat before giving up. Right
     /// after joining (or while sitting on the "waiting to join" screen), the
@@ -80,9 +132,11 @@ public struct TeamsChatPoster: Sendable {
 
     public init(
         maxDepth: Int = 80,
-        maxVisits: Int = 8000,
-        findAttempts: Int = 12,
-        findRetryDelay: Duration = .milliseconds(1000),
+        maxVisits: Int = 3000,
+        findAttempts: Int = 6,
+        findRetryDelay: Duration = .seconds(2),
+        initialDelay: Duration = .seconds(8),
+        markers: MeetingChatMarkers = .teamsDefaults,
         sendSettleDelay: Duration = .milliseconds(250),
         sendAttempts: Int = 4,
         sendRetryDelay: Duration = .milliseconds(250),
@@ -92,6 +146,8 @@ public struct TeamsChatPoster: Sendable {
         self.maxVisits = maxVisits
         self.findAttempts = max(1, findAttempts)
         self.findRetryDelay = findRetryDelay
+        self.initialDelay = initialDelay
+        self.markers = markers
         self.sendSettleDelay = sendSettleDelay
         self.sendAttempts = max(1, sendAttempts)
         self.sendRetryDelay = sendRetryDelay
@@ -129,16 +185,26 @@ public struct TeamsChatPoster: Sendable {
             return .failed(detail: "Teams is not running")
         }
 
+        // Let call setup finish before hammering Teams' main thread with AX
+        // IPC — the scan is exactly the kind of load that makes a joining
+        // meeting janky.
+        try? await Task.sleep(for: initialDelay)
+
         // Retry the scan: the meeting window, its "Chat" toggle, and the compose
         // box land in the AX tree only a moment after the call actually connects,
         // and the timing varies (especially if the user lingers on the "waiting
         // to join" screen). Re-resolve PIDs each pass so a late-launched helper
-        // process is picked up too.
+        // process is picked up too. Each sweep runs OFF the main actor so
+        // Alembic's own UI never blocks on Teams servicing AX queries.
         var compose: AXUIElement?
         for attempt in 0..<findAttempts {
             let livePids = teamsPIDs(bundlePrefix: bundlePrefix)
-            if let found = findMeetingChatComposeBox(in: livePids, meetingTitle: meetingTitle) {
-                compose = found
+            let found = await Task.detached(priority: .utility) { [self] in
+                findMeetingChatComposeBox(in: livePids, meetingTitle: meetingTitle)
+                    .map(AXElementBox.init)
+            }.value
+            if let found {
+                compose = found.element
                 break
             }
             if attempt < findAttempts - 1 {
@@ -243,8 +309,11 @@ public struct TeamsChatPoster: Sendable {
 
     /// The windows to consider for a given meeting title, most-specific first.
     ///
-    /// - With a title: windows whose AX title matches it (Teams appends
-    ///   " | Microsoft Teams", so a prefix/contains match is used).
+    /// - With a title: only windows whose AX title matches it (Teams appends
+    ///   " | Microsoft Teams", so a prefix/contains match is used). When none
+    ///   match, fall back to the focused window alone — never a full sweep of
+    ///   every Teams window, both to bound the AX load and so the notice can
+    ///   never land in an unrelated window.
     /// - Without a title: the focused window first, then the rest.
     private func matchingWindows(
         _ windows: [AXUIElement],
@@ -260,7 +329,10 @@ public struct TeamsChatPoster: Sendable {
             guard let wt = copyStringAttr(window, kAXTitleAttribute as String) else { return false }
             return windowTitle(wt, matches: title)
         }
-        return matches.isEmpty ? ordered : matches
+        if matches.isEmpty {
+            return Array(ordered.prefix(1))
+        }
+        return matches
     }
 
     /// Whether an AX window title corresponds to the captured meeting title.
@@ -298,8 +370,10 @@ public struct TeamsChatPoster: Sendable {
         guard copyStringAttr(element, kAXRoleAttribute as String) == (kAXButtonRole as String) else {
             return false
         }
-        return copyStringAttr(element, kAXDescriptionAttribute as String)?
-            .caseInsensitiveCompare("Chat") == .orderedSame
+        guard let desc = copyStringAttr(element, kAXDescriptionAttribute as String) else { return false }
+        return markers.chatToggleDescriptions.contains {
+            desc.caseInsensitiveCompare($0) == .orderedSame
+        }
     }
 
     /// Returns `windows` with the app's focused window first, if present.
@@ -339,12 +413,15 @@ public struct TeamsChatPoster: Sendable {
     /// A node that only exists in the in-meeting chat pane.
     private func isMeetingChatMarker(_ element: AXUIElement) -> Bool {
         let role = copyStringAttr(element, kAXRoleAttribute as String)
-        let desc = copyStringAttr(element, kAXDescriptionAttribute as String)
-        let title = copyStringAttr(element, kAXTitleAttribute as String)
-        if role == (kAXButtonRole as String), desc?.caseInsensitiveCompare("Close chat pane") == .orderedSame {
+        if role == (kAXButtonRole as String),
+           let desc = copyStringAttr(element, kAXDescriptionAttribute as String),
+           markers.paneMarkerButtonDescriptions.contains(where: { desc.caseInsensitiveCompare($0) == .orderedSame }) {
             return true
         }
-        if title?.caseInsensitiveCompare("Meeting chat") == .orderedSame { return true }
+        if let title = copyStringAttr(element, kAXTitleAttribute as String),
+           markers.paneMarkerTitles.contains(where: { title.caseInsensitiveCompare($0) == .orderedSame }) {
+            return true
+        }
         return false
     }
 
@@ -359,7 +436,18 @@ public struct TeamsChatPoster: Sendable {
             copyStringAttr(element, kAXDescriptionAttribute as String),
             copyStringAttr(element, kAXTitleAttribute as String),
         ].compactMap { $0?.lowercased() }
-        return hints.contains { $0.contains("message") }
+        return hints.contains { hint in
+            markers.composeHintSubstrings.contains { hint.contains($0) }
+        }
+    }
+
+    // MARK: - Concurrency bridging
+
+    /// Carries an `AXUIElement` (a CFType with no `Sendable` conformance) out
+    /// of the detached scan task. Safe: the element is an immutable IPC handle
+    /// and is only used from the main actor after the task completes.
+    private struct AXElementBox: @unchecked Sendable {
+        let element: AXUIElement
     }
 
     // MARK: - Keystroke synthesis
