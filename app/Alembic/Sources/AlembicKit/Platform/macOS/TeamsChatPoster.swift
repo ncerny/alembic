@@ -297,11 +297,14 @@ public struct TeamsChatPoster: Sendable {
             for window in candidates {
                 // Already open?
                 if let compose = composeBoxIfMeetingChat(in: window) { return compose }
-                // Closed → press the meeting "Chat" toggle in this window, wait,
-                // and re-scan.
+                // Closed → press the meeting "Chat" toggle in this window, then
+                // poll for the pane: the post-UI-update pane mounts its web
+                // content noticeably slower than the old 600 ms budget.
                 if pressChatToggle(in: window) {
-                    usleep(600_000)
-                    if let compose = composeBoxIfMeetingChat(in: window) { return compose }
+                    for _ in 0..<6 {
+                        usleep(500_000)
+                        if let compose = composeBoxIfMeetingChat(in: window) { return compose }
+                    }
                 }
             }
         }
@@ -368,12 +371,22 @@ public struct TeamsChatPoster: Sendable {
     }
 
     private func isChatToggle(_ element: AXUIElement) -> Bool {
-        guard copyStringAttr(element, kAXRoleAttribute as String) == (kAXButtonRole as String) else {
+        // Electron sometimes exposes toolbar toggles as AXCheckBox.
+        let role = copyStringAttr(element, kAXRoleAttribute as String)
+        guard role == (kAXButtonRole as String) || role == (kAXCheckBoxRole as String) else {
             return false
         }
         guard let desc = copyStringAttr(element, kAXDescriptionAttribute as String) else { return false }
-        return markers.chatToggleDescriptions.contains {
-            desc.caseInsensitiveCompare($0) == .orderedSame
+        let lowered = desc.lowercased()
+        return markers.chatToggleDescriptions.contains { marker in
+            let m = marker.lowercased()
+            // Exact, or exact + a state/badge suffix: with the pane closed and
+            // unread messages waiting, Teams describes the toggle as e.g.
+            // "Chat, 3 new messages" — never bare "Chat". Requiring a
+            // delimiter right after the marker keeps "Chat with Copilot" out.
+            return lowered == m
+                || lowered.hasPrefix(m + ",")
+                || lowered.hasPrefix(m + " (")
         }
     }
 
