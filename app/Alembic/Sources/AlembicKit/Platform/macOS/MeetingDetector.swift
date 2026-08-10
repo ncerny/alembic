@@ -53,8 +53,11 @@ public struct Detection: Sendable, Equatable {
 /// **Stickiness:** once a detection is active, only the detected app's own
 /// process family feeds the policy signal. Another catalog app briefly holding
 /// audio (a Slack chime during a Teams meeting) cannot end or hijack the
-/// session. Interactive sessions persist while the family runs input *or*
-/// output; broadcast sessions while it runs output.
+/// session. Interactive sessions persist while the family runs *input* — the
+/// mic is held continuously during a call (even muted; verified live via
+/// audio-watch) and released instantly at hang-up, so input-drop ends the
+/// session within `endDebounce` instead of riding the family's ~11.5 s
+/// post-call output linger. Broadcast sessions persist while it runs output.
 ///
 /// **Back-to-back split:** while active, when the app's strict meeting-window
 /// title changes to a different non-nil value and stays changed for
@@ -237,7 +240,15 @@ public final class MeetingDetector: @unchecked Sendable {
         }
         switch candidate.tier {
         case .interactive:
-            return (hasInput || hasOutput) ? .interactive : .none
+            // Input is the end-of-call signal. Empirically verified via
+            // audio-watch on a live Teams call (2026-08-10): mute/unmute never
+            // touches the family's CoreAudio input state, hang-up releases it
+            // instantly, and a helper process then runs output-only for
+            // ~11.5 s (the end-call sound linger). Keying persistence on
+            // input ends the session ~3-4 s after hang-up instead of riding
+            // the linger to ~15-17 s. A mid-call input gap (audio-device
+            // switch) shorter than endDebounce re-enters .active harmlessly.
+            return hasInput ? .interactive : .none
         case .broadcastCandidate:
             return hasOutput ? .broadcast : .none
         }
