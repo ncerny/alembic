@@ -20,6 +20,22 @@ public struct MeetingApp: Sendable, Equatable {
     /// `isRunningOutput == true` before the app is considered in-call.
     public let requiresOutput: Bool
 
+    /// When `true`, at least one matching process must also have
+    /// `isRunningInput == true` before the app counts as *interactively*
+    /// in-call. Combined with `requiresOutput`, this is the strong signal for
+    /// a real two-way call: notification chimes never run the mic, so they can
+    /// hold output (Electron keeps the output unit alive ~10–15 s after a
+    /// sound) without ever satisfying this gate.
+    public let requiresInput: Bool
+
+    /// When `true`, output-only activity (mic never running — e.g. a town
+    /// hall / live event the user attends view-only) may still produce a
+    /// detection, but only as a `.broadcastCandidate`: the detection policy
+    /// applies a much longer start debounce, and the detector additionally
+    /// requires a meeting window whose title survives
+    /// `nonMeetingTitlePrefixes` strictly.
+    public let broadcastEligible: Bool
+
     /// When `true`, a window-title confirmation from `WindowTitleProbe`
     /// (Phase 7) is required before this entry can produce a detection.
     ///
@@ -57,6 +73,8 @@ public struct MeetingApp: Sendable, Equatable {
         displayName: String,
         bundlePrefixes: [String],
         requiresOutput: Bool = false,
+        requiresInput: Bool = false,
+        broadcastEligible: Bool = false,
         requiresTitleConfirmation: Bool = false,
         titleHints: [String] = [],
         nonMeetingTitlePrefixes: [String] = [],
@@ -65,6 +83,8 @@ public struct MeetingApp: Sendable, Equatable {
         self.displayName = displayName
         self.bundlePrefixes = bundlePrefixes
         self.requiresOutput = requiresOutput
+        self.requiresInput = requiresInput
+        self.broadcastEligible = broadcastEligible
         self.requiresTitleConfirmation = requiresTitleConfirmation
         self.titleHints = titleHints
         self.nonMeetingTitlePrefixes = nonMeetingTitlePrefixes
@@ -140,7 +160,9 @@ public enum MeetingAppCatalog {
                 "com.microsoft.teams",   // Teams classic
                 "com.microsoft.teams2",  // Teams new (covers .modulehost, .helper, etc.)
             ],
-            requiresOutput: true,    // Teams holds the mic outside calls; output confirms in-call
+            requiresOutput: true,    // notification chimes hold output for 10-15s
+            requiresInput: true,     // ...but never the mic; a real call runs both
+            broadcastEligible: true, // town halls / live events: output-only, slow tier
             nonMeetingTitlePrefixes: [
                 "Chat", "Activity", "Calendar", "Calls",
                 "Teams and Channels", "Files", "Microsoft Teams",
@@ -155,11 +177,15 @@ public enum MeetingAppCatalog {
             displayName: "Zoom",
             bundlePrefixes: ["us.zoom.xos"],
             requiresOutput: true,    // Zoom holds the mic during Settings → Audio preview
+            requiresInput: true,     // speaker test / previews hold output without a call
+            broadcastEligible: true, // webinars: attendee mic never runs
             titleHints: ["Zoom Meeting"]
         ),
         MeetingApp(
             displayName: "Slack",
-            bundlePrefixes: ["com.tinyspeck.slackmacgap"]
+            bundlePrefixes: ["com.tinyspeck.slackmacgap"],
+            requiresOutput: true,    // Slack plays notification sounds all day
+            requiresInput: true      // huddles always run the mic; no broadcast mode
         ),
         // Generic browser / WebKit helpers — gated behind title confirmation.
         // These cover Google Meet in Chrome or Safari, but MUST NOT fire on
@@ -212,8 +238,18 @@ public enum MeetingAppCatalog {
 
     // MARK: - In-call detection
 
-    /// Returns the highest-confidence in-call `MeetingAppMatch`, or `nil` when
-    /// no active meeting is detected.
+    /// One app's current in-call evidence, produced by `detectCandidates`.
+    public struct InCallCandidate: Sendable, Equatable {
+        public let match: MeetingAppMatch
+        /// `.interactive` when the app's full audio gate is satisfied;
+        /// `.broadcastCandidate` when only output is running and the app is
+        /// `broadcastEligible` (needs the slow debounce + title gate upstream).
+        public let tier: DetectionTier
+        public let hasInput: Bool
+        public let hasOutput: Bool
+    }
+
+    /// Returns every catalog app with in-call evidence in `processStates`.
     ///
     /// **Caller responsibility:** the `processStates` array must already
     /// exclude Alembic's own PID.
@@ -221,29 +257,15 @@ public enum MeetingAppCatalog {
     /// Rules per app per prefix:
     /// - `requiresTitleConfirmation: true` → skipped unless `confirmedTitles`
     ///   contains an overlapping `titleHints` substring.
-    /// - `requiresOutput: true` → at least one matching process must have
-    ///   `isRunningOutput == true` (Zoom mic-preview guard).
-    /// - Default OR gate → `isRunningInput || isRunningOutput`.
-    ///
-    /// **Conflict resolution** (multiple apps in-call simultaneously):
-    /// - Single match → return it.
-    /// - Multiple matches → prefer the one with `isRunningOutput`; if still
-    ///   tied, return `nil` (do not guess).
-    ///
-    /// The `canonicalBundlePrefix` of the returned `MeetingAppMatch` is always
-    /// a prefix from the matched app's own `bundlePrefixes` list and is
-    /// suitable for resolving to a `CaptureTarget` via ScreenCaptureKit.
-    public static func detectInCall(
+    /// - `requiresInput`/`requiresOutput` gates must all be satisfied for an
+    ///   `.interactive` candidate (default OR gate when neither is set).
+    /// - `broadcastEligible: true` + output running (gates not satisfied) →
+    ///   `.broadcastCandidate`.
+    public static func detectCandidates(
         processStates: [AudioProcessState],
         confirmedTitles: Set<String> = []
-    ) -> MeetingAppMatch? {
-        struct Candidate {
-            let app: MeetingApp
-            let canonicalBundlePrefix: String
-            let hasOutput: Bool
-        }
-
-        var candidates: [Candidate] = []
+    ) -> [InCallCandidate] {
+        var candidates: [InCallCandidate] = []
 
         for app in apps {
             if app.requiresTitleConfirmation {
@@ -259,30 +281,68 @@ public enum MeetingAppCatalog {
                     return id == p || id.hasPrefix(p + ".")
                 }
                 guard !relevant.isEmpty else { continue }
+                let hasInput = relevant.contains { $0.isRunningInput }
                 let hasOutput = relevant.contains { $0.isRunningOutput }
-                let inCall: Bool
-                if app.requiresOutput {
-                    inCall = hasOutput
-                } else {
-                    inCall = relevant.contains { $0.isRunningInput || $0.isRunningOutput }
+
+                let interactive: Bool
+                switch (app.requiresInput, app.requiresOutput) {
+                case (true, true):   interactive = hasInput && hasOutput
+                case (false, true):  interactive = hasOutput
+                case (true, false):  interactive = hasInput
+                case (false, false): interactive = hasInput || hasOutput
                 }
-                if inCall {
-                    candidates.append(Candidate(app: app, canonicalBundlePrefix: prefix, hasOutput: hasOutput))
+
+                let tier: DetectionTier?
+                if interactive {
+                    tier = .interactive
+                } else if app.broadcastEligible && hasOutput {
+                    tier = .broadcastCandidate
+                } else {
+                    tier = nil
+                }
+                if let tier {
+                    candidates.append(InCallCandidate(
+                        match: MeetingAppMatch(app: app, canonicalBundlePrefix: prefix),
+                        tier: tier,
+                        hasInput: hasInput,
+                        hasOutput: hasOutput
+                    ))
                     break  // one match per app is sufficient
                 }
             }
         }
+        return candidates
+    }
 
-        switch candidates.count {
-        case 0:
-            return nil
-        case 1:
-            return MeetingAppMatch(app: candidates[0].app, canonicalBundlePrefix: candidates[0].canonicalBundlePrefix)
-        default:
-            let withOutput = candidates.filter { $0.hasOutput }
-            guard withOutput.count == 1 else { return nil }
-            return MeetingAppMatch(app: withOutput[0].app, canonicalBundlePrefix: withOutput[0].canonicalBundlePrefix)
+    /// Resolves `detectCandidates` output to at most one winner.
+    ///
+    /// **Conflict resolution:**
+    /// - Interactive candidates always outrank broadcast candidates.
+    /// - Single survivor → return it.
+    /// - Multiple interactive → prefer the sole one with output; still tied →
+    ///   `nil` (do not guess).
+    /// - Multiple broadcast-only → `nil` (do not guess).
+    public static func resolve(_ candidates: [InCallCandidate]) -> InCallCandidate? {
+        let interactive = candidates.filter { $0.tier == .interactive }
+        if !interactive.isEmpty {
+            if interactive.count == 1 { return interactive[0] }
+            let withOutput = interactive.filter { $0.hasOutput }
+            return withOutput.count == 1 ? withOutput[0] : nil
         }
+        let broadcast = candidates.filter { $0.tier == .broadcastCandidate }
+        return broadcast.count == 1 ? broadcast[0] : nil
+    }
+
+    /// Returns the highest-confidence in-call `MeetingAppMatch`, or `nil` when
+    /// no active meeting is detected. Convenience over
+    /// `resolve(detectCandidates(…))` — note that a `.broadcastCandidate`
+    /// result here is *raw evidence*; the detection policy still applies the
+    /// long broadcast debounce and title gate before it becomes a meeting.
+    public static func detectInCall(
+        processStates: [AudioProcessState],
+        confirmedTitles: Set<String> = []
+    ) -> MeetingAppMatch? {
+        resolve(detectCandidates(processStates: processStates, confirmedTitles: confirmedTitles))?.match
     }
 
     /// Returns the first known meeting app currently in a call, or `nil`.

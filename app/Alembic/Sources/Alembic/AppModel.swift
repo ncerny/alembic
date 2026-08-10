@@ -96,6 +96,20 @@ final class AppModel {
     /// against stopping a user-initiated session and to allow auto-stop when the
     /// detected call ends.
     @ObservationIgnored private var autoStartedTarget: CaptureTarget?
+    /// A confirmed detection that couldn't start yet (model preflight running,
+    /// capture target not enumerable). Retried by `detectionRetryTask` so a
+    /// meeting is never silently skipped.
+    @ObservationIgnored private var pendingDetection: Detection?
+    @ObservationIgnored private var detectionRetryTask: Task<Void, Never>?
+
+    /// Auto-started sessions self-discard (files deleted) when no far-end
+    /// speech is transcribed within this window — the safety net against
+    /// notification-chime false positives. Manual recordings are exempt.
+    private static let silentDiscardWindow: TimeInterval = 120
+
+    /// How often and how long to retry a parked detection.
+    private static let detectionRetryInterval: TimeInterval = 5
+    private static let detectionRetryAttempts = 12
 
     init() {
         session = AppModel.makeSession(localeBox: localeBox, vocabularyBox: vocabularyBox, contextBox: contextBox)
@@ -257,7 +271,10 @@ final class AppModel {
         )
         contextBox.set(ctx)
 
-        await session.start(target: target)
+        // Auto-started sessions get the silent-discard safety net; a deliberate
+        // manual recording is never self-destructed.
+        let discardWindow: TimeInterval? = autoStartedTarget != nil ? AppModel.silentDiscardWindow : nil
+        await session.start(target: target, discardIfSilentAfter: discardWindow)
         isPreparingModels = false
         // Fire-and-forget: the disclosure poster retries for several seconds
         // while the meeting UI settles, so it must not block start()'s caller
@@ -364,6 +381,9 @@ final class AppModel {
                 let confirmApps = MeetingAppCatalog.apps.filter { $0.requiresTitleConfirmation }
                 guard !confirmApps.isEmpty else { return [] }
                 return WindowTitleProbe.presentHints(for: confirmApps, processStates: states)
+            },
+            meetingTitleProvider: { match in
+                WindowTitleProbe.meetingWindowTitle(for: match)
             }
         )
         detector = det
@@ -394,44 +414,95 @@ final class AppModel {
     private func stopDetector() {
         detectorTask?.cancel()
         consumerTask?.cancel()
+        detectionRetryTask?.cancel()
         detectorTask = nil
         consumerTask = nil
+        detectionRetryTask = nil
+        pendingDetection = nil
         detector = nil
     }
 
     @MainActor private func handleDetection(_ detection: Detection?) async {
+        // Any fresh event supersedes a parked retry.
+        detectionRetryTask?.cancel()
+        detectionRetryTask = nil
+        pendingDetection = nil
+
         if let d = detection {
             // Don't interrupt any active session (user-initiated or auto-started).
             switch session.state {
             case .recording, .finalizing: return
             default: break
             }
-            guard !isPreparingModels else { return }
-
-            // Re-enumerate capture targets before auto-starting. The launch-time
-            // target list is stale for any meeting app launched after Alembic
-            // (e.g. Zoom started later in the day), which previously caused the
-            // detection to fire but find no target and silently bail. Rebuild a
-            // terminal session first so enumeration runs against a live source.
-            if AppModel.isTerminal(session.state) {
-                session = AppModel.makeSession(localeBox: localeBox, vocabularyBox: vocabularyBox, contextBox: contextBox)
-            }
-            await refreshTargets()
-
-            let prefix = d.canonicalBundlePrefix.lowercased()
-            let target = session.availableTargets.first(where: { t in
-                let id = t.id.lowercased()
-                return id == prefix || id.hasPrefix(prefix + ".")
-            })
-            guard let target else { return }
-            selectedTarget = target
-            autoStartedTarget = target
-            await start()
+            if await attemptAutoStart(d) { return }
+            // Blocked (model preflight mid-flight, target not enumerable yet,
+            // permission hiccup): park the detection and keep trying — the
+            // detector only emits on *changes*, so bailing here would skip the
+            // whole meeting.
+            scheduleDetectionRetry(d)
         } else {
             // Detection ended — only auto-stop if this session was auto-started.
             guard autoStartedTarget != nil else { return }
             autoStartedTarget = nil
             await stop()
+        }
+    }
+
+    /// Tries to begin recording for a confirmed detection. Returns `false`
+    /// when blocked so the caller can park and retry.
+    @MainActor private func attemptAutoStart(_ d: Detection) async -> Bool {
+        guard !isPreparingModels else { return false }
+
+        // Re-enumerate capture targets before auto-starting. The launch-time
+        // target list is stale for any meeting app launched after Alembic
+        // (e.g. Zoom started later in the day), which previously caused the
+        // detection to fire but find no target and silently bail. Rebuild a
+        // terminal session first so enumeration runs against a live source.
+        if AppModel.isTerminal(session.state) {
+            session = AppModel.makeSession(localeBox: localeBox, vocabularyBox: vocabularyBox, contextBox: contextBox)
+        }
+        await refreshTargets()
+
+        let prefix = d.canonicalBundlePrefix.lowercased()
+        let target = session.availableTargets.first(where: { t in
+            let id = t.id.lowercased()
+            return id == prefix || id.hasPrefix(prefix + ".")
+        })
+        guard let target else { return false }
+        selectedTarget = target
+        autoStartedTarget = target
+        await start()
+        if case .recording = session.state { return true }
+        autoStartedTarget = nil
+        return false
+    }
+
+    /// Retries a parked detection every `detectionRetryInterval` seconds, up
+    /// to `detectionRetryAttempts` times. Gives up (with a visible notice)
+    /// only after the window is exhausted, or silently when the detection is
+    /// superseded or a session starts by other means.
+    @MainActor private func scheduleDetectionRetry(_ d: Detection) {
+        pendingDetection = d
+        detectionRetryTask = Task { @MainActor [weak self] in
+            for _ in 0..<AppModel.detectionRetryAttempts {
+                try? await Task.sleep(for: .seconds(AppModel.detectionRetryInterval))
+                guard let self, !Task.isCancelled else { return }
+                guard self.pendingDetection == d else { return }
+                switch self.session.state {
+                case .recording, .finalizing:
+                    self.pendingDetection = nil
+                    return
+                default: break
+                }
+                if await self.attemptAutoStart(d) {
+                    self.pendingDetection = nil
+                    return
+                }
+            }
+            guard let self, self.pendingDetection == d else { return }
+            self.pendingDetection = nil
+            self.preparationError =
+                "Auto-start: detected a \(d.app.displayName) meeting but couldn't begin recording"
         }
     }
 
@@ -461,7 +532,7 @@ final class AppModel {
     var canStart: Bool {
         guard selectedTarget != nil, !isPreparingModels else { return false }
         switch session.state {
-        case .idle, .selecting, .saved, .error: return true
+        case .idle, .selecting, .saved, .error, .discarded: return true
         case .recording, .finalizing: return false
         }
     }
@@ -505,12 +576,13 @@ final class AppModel {
         case .finalizing: return "Finalizing…"
         case .saved: return "Saved — \(elapsedString)"
         case .error(let message): return "Error: \(message)"
+        case .discarded(let reason): return "Discarded — \(reason)"
         }
     }
 
     private static func isTerminal(_ state: SessionState) -> Bool {
         switch state {
-        case .saved, .error: return true
+        case .saved, .error, .discarded: return true
         default: return false
         }
     }

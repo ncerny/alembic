@@ -61,6 +61,35 @@ public struct WindowTitleProbe: Sendable {
     /// Uses the Screen Recording permission Alembic already holds; no new
     /// permission is required.
     public static func fullTitle(forBundleID bundleID: String, appHints: [String] = [], exclusions: [String] = [], trailingStrips: [String] = []) -> String? {
+        guard let raw = MeetingContext.bestTitle(
+            from: titleCandidates(forBundleID: bundleID),
+            appHints: appHints,
+            exclusions: exclusions,
+            preferFrontmost: true
+        ) else { return nil }
+        return MeetingContext.applyTrailingStrips(to: raw, strips: trailingStrips)
+    }
+
+    /// Strict meeting-window title for a matched catalog app, or `nil` when
+    /// only hub/non-meeting windows are on screen.
+    ///
+    /// Unlike `fullTitle`, this never falls back to an excluded title: it is
+    /// the detection-side question "does a real meeting window exist right
+    /// now, and what is it called?" — used to gate broadcast-tier detections
+    /// and to split back-to-back meetings on a title change.
+    public static func meetingWindowTitle(for match: MeetingAppMatch) -> String? {
+        guard let raw = MeetingContext.bestTitle(
+            from: titleCandidates(forBundleID: match.canonicalBundlePrefix),
+            appHints: match.app.titleHints,
+            exclusions: match.app.nonMeetingTitlePrefixes,
+            preferFrontmost: true,
+            exclusionFallback: false
+        ) else { return nil }
+        return MeetingContext.applyTrailingStrips(to: raw, strips: match.app.titleTrailingStrips)
+    }
+
+    /// Collects on-screen window titles for a bundle-ID family, front-to-back.
+    private static func titleCandidates(forBundleID bundleID: String) -> [String] {
         var candidatePIDs: Set<Int32> = []
 
         // If the id is a raw PID reference (e.g. "pid:1234"), use it directly.
@@ -86,11 +115,11 @@ public struct WindowTitleProbe: Sendable {
             }
         }
 
-        guard !candidatePIDs.isEmpty else { return nil }
+        guard !candidatePIDs.isEmpty else { return [] }
 
         guard let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-        ) as? [[String: Any]] else { return nil }
+        ) as? [[String: Any]] else { return [] }
 
         // New Teams (and similar Electron apps) spawn tiny (~66x20) overlay
         // helper windows titled "Window" alongside the real meeting/hub windows.
@@ -114,14 +143,9 @@ public struct WindowTitleProbe: Sendable {
         }
 
         // `windowList` is front-to-back, so `candidates` preserves z-order and
-        // `preferFrontmost` selects the frontmost qualifying window — the live
-        // meeting window during a call — over a longer stray hub title behind it.
-        guard let raw = MeetingContext.bestTitle(
-            from: candidates,
-            appHints: appHints,
-            exclusions: exclusions,
-            preferFrontmost: true
-        ) else { return nil }
-        return MeetingContext.applyTrailingStrips(to: raw, strips: trailingStrips)
+        // `preferFrontmost` in the callers selects the frontmost qualifying
+        // window — the live meeting window during a call — over a longer stray
+        // hub title behind it.
+        return candidates
     }
 }
