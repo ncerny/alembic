@@ -80,9 +80,10 @@ public struct MeetingChatMarkers: Sendable {
         self.composeHintSubstrings = composeHintSubstrings
     }
 
-    /// Validated against new Teams (`com.microsoft.teams2`) as of 2026-06.
-    /// NOTE: believed stale after a mid-2026 Teams UI update — re-derive with
-    /// ax-dump (see type docs) and update these values.
+    /// Re-verified against new Teams (`com.microsoft.teams2`) on 2026-08-10
+    /// via a live in-meeting ax-dump: all four markers present and exact.
+    /// The compose box is identified by its *description* ("Type a message");
+    /// it no longer exposes an AX placeholder attribute.
     public static let teamsDefaults = MeetingChatMarkers(
         paneMarkerButtonDescriptions: ["Close chat pane"],
         paneMarkerTitles: ["Meeting chat"],
