@@ -11,6 +11,15 @@ import AlembicKit
 @main
 struct AlembicCheck {
     static func main() async {
+        // Live diagnostic mode: `swift run AlembicCheck audio-watch [seconds]`
+        // (see AudioWatchProbe). Everything else runs the check suite.
+        let args = CommandLine.arguments
+        if args.count >= 2, args[1] == "audio-watch" {
+            let seconds = args.count >= 3 ? (Double(args[2]) ?? 60) : 60
+            await AudioWatchProbe.run(seconds: seconds)
+            return
+        }
+
         let suite = CheckSuite()
         await runAllChecks(suite)
         suite.finishAndExit()
@@ -31,6 +40,7 @@ struct AlembicCheck {
         checkVocabularyStore(s)
         checkMeetingAppCatalog(s)
         checkMeetingDetectionPolicy(s)
+        checkDetectionTierPolicy(s)
         checkDetectInCall(s)
         checkMeetingDetector(s)
         checkMeetingContext(s)
@@ -565,6 +575,7 @@ struct AlembicCheck {
             case .finalizing: return "finalizing"
             case .saved: return "saved"
             case .error: return "error"
+            case .discarded: return "discarded"
             }
         }
         func chunk(_ source: SourceTag, _ start: Double) -> AudioChunk {
@@ -786,6 +797,102 @@ struct AlembicCheck {
                 let lines = try decodeLines(url)
                 s.expect(lines.count >= 0, "partial transcript on disk is fully parseable (\(lines.count) line(s))")
             }
+        }
+
+        // --- Silent-session discard (auto-start false-positive safety net) ---
+        await s.checkAsync("MeetingSession discard: silent session self-destructs and deletes its files") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            // "you" speech only — a false positive can still catch the user
+            // talking to themselves; far-end silence is what matters.
+            let you = FakeTranscriptionEngine(script: [
+                TranscriptEvent(kind: .finalized, source: .you, start: 0, end: 1, text: "hello?"),
+            ], emitOnStart: true)
+            let them = FakeTranscriptionEngine(script: [], emitOnStart: true)
+            let source = FakeAudioSource(script: [chunk(.you, 0)], finishAfterScript: false)
+            let make = makeWriterFactory(dir)
+
+            let session = await MainActor.run {
+                MeetingSession(
+                    audioSource: source,
+                    engineFactory: { tag, _ in tag == .you ? you : them },
+                    makeWriter: make)
+            }
+            await session.loadTargets()
+            await session.start(target: await session.availableTargets.first!, discardIfSilentAfter: 0.2)
+
+            await session.waitUntilFinished()
+
+            guard case .discarded = await session.state else {
+                s.expect(false, "silent session reached .discarded"); return
+            }
+            s.expect(await session.outputURL == nil, "outputURL cleared after discard")
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            s.expect(leftovers.isEmpty, "transcript files deleted (found: \(leftovers))")
+        }
+
+        await s.checkAsync("MeetingSession discard: far-end speech vetoes the watchdog") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let you = FakeTranscriptionEngine(script: [], emitOnStart: true)
+            let them = FakeTranscriptionEngine(script: [
+                TranscriptEvent(kind: .finalized, source: .them, start: 0, end: 1, text: "welcome"),
+            ], emitOnStart: true)
+            let source = FakeAudioSource(script: [chunk(.them, 0)], finishAfterScript: false)
+            let make = makeWriterFactory(dir)
+
+            let session = await MainActor.run {
+                MeetingSession(
+                    audioSource: source,
+                    engineFactory: { tag, _ in tag == .you ? you : them },
+                    makeWriter: make)
+            }
+            await session.loadTargets()
+            await session.start(target: await session.availableTargets.first!, discardIfSilentAfter: 0.2)
+
+            // Give the watchdog time to fire (and correctly do nothing).
+            try await Task.sleep(for: .milliseconds(600))
+            s.expectEqual(label(await session.state), "recording", "session with far-end speech keeps recording")
+
+            await session.stop()
+            guard case let .saved(url) = await session.state else {
+                s.expect(false, "session saved normally"); return
+            }
+            s.expect(FileManager.default.fileExists(atPath: url.path), "transcript file kept")
+        }
+
+        await s.checkAsync("MeetingSession discard: them-speech landing during the drain rescues the file") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            // emitOnStart:false → the "them" event is released only by
+            // finish(), i.e. mid-drain, after the watchdog decided to discard.
+            let you = FakeTranscriptionEngine(script: [], emitOnStart: false)
+            let them = FakeTranscriptionEngine(script: [
+                TranscriptEvent(kind: .finalized, source: .them, start: 0, end: 1, text: "late arrival"),
+            ], emitOnStart: false)
+            let source = FakeAudioSource(script: [chunk(.them, 0)], finishAfterScript: false)
+            let make = makeWriterFactory(dir)
+
+            let session = await MainActor.run {
+                MeetingSession(
+                    audioSource: source,
+                    engineFactory: { tag, _ in tag == .you ? you : them },
+                    makeWriter: make)
+            }
+            await session.loadTargets()
+            await session.start(target: await session.availableTargets.first!, discardIfSilentAfter: 0.2)
+
+            await session.waitUntilFinished()
+
+            guard case let .saved(url) = await session.state else {
+                s.expect(false, "in-flight far-end speech → .saved, not .discarded"); return
+            }
+            s.expect(FileManager.default.fileExists(atPath: url.path), "rescued transcript kept on disk")
+            let lines = try decodeLines(url)
+            s.expectEqual(lines.count, 1, "the rescued far-end line was written")
         }
     }
 
@@ -1315,16 +1422,23 @@ struct AlembicCheck {
             s.expectEqual(detected?.displayName, "Microsoft Teams", "Teams with output → Microsoft Teams")
         }
 
-        s.check("MeetingAppCatalog.isInCall: Slack in-call via input OR output") { s in
+        s.check("MeetingAppCatalog.isInCall: Slack requires input AND output (huddle gate)") { s in
+            // Slack plays notification sounds all day; output alone must never
+            // detect. A huddle always runs the mic, so input+output is the gate.
             let viaInput = [AudioProcessState(pid: 100, bundleID: "com.tinyspeck.slackmacgap",
                                               isRunningInput: true, isRunningOutput: false)]
-            s.expect(MeetingAppCatalog.isInCall(processStates: viaInput) != nil,
-                     "Slack in-call via input alone")
+            s.expect(MeetingAppCatalog.isInCall(processStates: viaInput) == nil,
+                     "Slack input-only → no detection")
 
             let viaOutput = [AudioProcessState(pid: 100, bundleID: "com.tinyspeck.slackmacgap",
                                                isRunningInput: false, isRunningOutput: true)]
-            s.expect(MeetingAppCatalog.isInCall(processStates: viaOutput) != nil,
-                     "Slack in-call via output alone")
+            s.expect(MeetingAppCatalog.isInCall(processStates: viaOutput) == nil,
+                     "Slack output-only (notification sound) → no detection")
+
+            let huddle = [AudioProcessState(pid: 100, bundleID: "com.tinyspeck.slackmacgap",
+                                            isRunningInput: true, isRunningOutput: true)]
+            s.expect(MeetingAppCatalog.isInCall(processStates: huddle) != nil,
+                     "Slack huddle (input+output) → detection")
 
             let idle = [AudioProcessState(pid: 100, bundleID: "com.tinyspeck.slackmacgap",
                                           isRunningInput: false, isRunningOutput: false)]
@@ -1576,6 +1690,94 @@ struct AlembicCheck {
             s.expect(match?.canonicalBundlePrefix == "com.microsoft.teams2",
                      "teams2.modulehost maps to com.microsoft.teams2")
         }
+
+        // --- Tiers: Teams output-only is broadcast evidence, not interactive ---
+        s.check("detectCandidates: Teams output-only (notification chime) → broadcastCandidate") { s in
+            let chime = [state("com.microsoft.teams2", input: false, output: true)]
+            let candidates = MeetingAppCatalog.detectCandidates(processStates: chime)
+            s.expectEqual(candidates.count, 1, "one candidate")
+            s.expectEqual(candidates.first?.tier, .broadcastCandidate,
+                          "output-only Teams is broadcast evidence, never interactive")
+
+            let call = [state("com.microsoft.teams2", input: true, output: true)]
+            s.expectEqual(MeetingAppCatalog.detectCandidates(processStates: call).first?.tier,
+                          .interactive, "input+output Teams is interactive")
+        }
+
+        // --- Tiers: input/output split across helper processes still interactive ---
+        s.check("detectCandidates: Teams gate satisfied across separate family processes") { s in
+            let split = [
+                state("com.microsoft.teams2", input: true, output: false),
+                AudioProcessState(pid: 2, bundleID: "com.microsoft.teams2.modulehost",
+                                  isRunningInput: false, isRunningOutput: true),
+            ]
+            s.expectEqual(MeetingAppCatalog.detectCandidates(processStates: split).first?.tier,
+                          .interactive, "input on parent + output on helper → interactive")
+        }
+
+        // --- Tiers: Slack is never a broadcast candidate ---
+        s.check("detectCandidates: Slack output-only yields no candidate (not broadcastEligible)") { s in
+            let chime = [state("com.tinyspeck.slackmacgap", input: false, output: true)]
+            s.expect(MeetingAppCatalog.detectCandidates(processStates: chime).isEmpty,
+                     "Slack notification sound → no candidate at all")
+        }
+
+        // --- resolve: interactive outranks broadcast ---
+        s.check("resolve: interactive candidate outranks broadcast candidate") { s in
+            let states = [
+                state("com.microsoft.teams2", input: false, output: true),      // broadcast evidence
+                AudioProcessState(pid: 2, bundleID: "us.zoom.xos",
+                                  isRunningInput: true, isRunningOutput: true), // interactive
+            ]
+            let winner = MeetingAppCatalog.resolve(MeetingAppCatalog.detectCandidates(processStates: states))
+            s.expectEqual(winner?.match.app.displayName, "Zoom",
+                          "Zoom interactive beats Teams broadcast evidence")
+
+            // Two broadcast-only candidates → ambiguous, no guess.
+            let twoBroadcasts = [
+                state("com.microsoft.teams2", input: false, output: true),
+                AudioProcessState(pid: 2, bundleID: "us.zoom.xos",
+                                  isRunningInput: false, isRunningOutput: true),
+            ]
+            s.expect(MeetingAppCatalog.resolve(MeetingAppCatalog.detectCandidates(processStates: twoBroadcasts)) == nil,
+                     "two broadcast candidates → nil (do not guess)")
+        }
+    }
+
+    // MARK: - Detection tiers: policy-level checks
+
+    static func checkDetectionTierPolicy(_ s: CheckSuite) {
+        s.check("MeetingDetectionPolicy: broadcast signal needs broadcastStartDebounce") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4, broadcastStartDebounce: 30, endDebounce: 3)
+            s.expectEqual(policy.processSample(signal: .broadcast, now: 0), .confirming, "broadcast → confirming")
+            // A chime's output linger (10–15s) dies well inside the window.
+            s.expectEqual(policy.processSample(signal: .broadcast, now: 15), .confirming, "15s: still confirming")
+            s.expectEqual(policy.processSample(signal: .none, now: 16), .idle, "linger ended → idle, never active")
+
+            // Sustained broadcast (a real town hall) confirms at 30s.
+            s.expectEqual(policy.processSample(signal: .broadcast, now: 20), .confirming, "re-enter confirming")
+            s.expectEqual(policy.processSample(signal: .broadcast, now: 49), .confirming, "29s elapsed: not yet")
+            s.expectEqual(policy.processSample(signal: .broadcast, now: 50), .active, "30s elapsed → active")
+        }
+
+        s.check("MeetingDetectionPolicy: broadcast→interactive upgrade keeps elapsed time") { s in
+            var policy = MeetingDetectionPolicy(startDebounce: 4, broadcastStartDebounce: 30, endDebounce: 3)
+            s.expectEqual(policy.processSample(signal: .broadcast, now: 0), .confirming, "broadcast confirming")
+            s.expectEqual(policy.processSample(signal: .broadcast, now: 3), .confirming, "3s: below both thresholds")
+            // Mic joins in (user was let in from the lobby): interactive
+            // threshold (4s) is already elapsed at 5s → active immediately.
+            s.expectEqual(policy.processSample(signal: .interactive, now: 5), .active, "upgrade confirms against 4s threshold")
+        }
+
+        s.check("MeetingDetectionPolicy: Bool shim maps true to interactive") { s in
+            var viaShim = MeetingDetectionPolicy(startDebounce: 4, endDebounce: 3)
+            var viaSignal = MeetingDetectionPolicy(startDebounce: 4, endDebounce: 3)
+            for (t, inCall) in [(0.0, true), (4.0, true), (5.0, false), (9.0, false)] {
+                let a = viaShim.processSample(isInCall: inCall, now: t)
+                let b = viaSignal.processSample(signal: inCall ? .interactive : .none, now: t)
+                s.expectEqual(a, b, "shim and signal agree at t=\(t)")
+            }
+        }
     }
 
     // MARK: - Phase 4 (MeetingDetector): synchronous tick-based integration
@@ -1684,6 +1886,129 @@ struct AlembicCheck {
             let r = det.tick(snapshot: teams(), now: 10) // active again
             guard let change = r else { s.expect(false, "after reset: expected re-emission"); return }
             s.expect(change != nil, "Detection re-emitted after reset")
+        }
+
+        // --- 6. Stickiness: another app's audio can't end an active session ---
+        s.check("MeetingDetector tick: Slack chime during active Teams call does not end/split it") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(), now: 0)
+            let started = det.tick(snapshot: teams(), now: 0)
+            s.expect(started?.flatMap { $0 } != nil, "Teams call became active")
+
+            // Slack starts making noise (huddle-grade evidence, even): before
+            // stickiness this tied the global resolver to nil and ended the
+            // session after end-debounce.
+            let teamsPlusSlack: [AudioProcessState] = teams() + [
+                AudioProcessState(pid: 9, bundleID: "com.tinyspeck.slackmacgap",
+                                  isRunningInput: true, isRunningOutput: true),
+            ]
+            for t in stride(from: 1.0, through: 20.0, by: 1.0) {
+                let r = det.tick(snapshot: teamsPlusSlack, now: t)
+                s.expect(r == nil, "active Teams session unaffected by Slack audio at t=\(t)")
+            }
+
+            // Teams family goes fully silent → session ends even though Slack
+            // is still noisy (per-app signal, not global).
+            let slackOnly = [AudioProcessState(pid: 9, bundleID: "com.tinyspeck.slackmacgap",
+                                               isRunningInput: true, isRunningOutput: true)]
+            _ = det.tick(snapshot: slackOnly, now: 21)      // active → ending
+            let ended = det.tick(snapshot: slackOnly, now: 22) // ending → idle (0s debounce)
+            s.expect(ended == .some(.none) || (ended != nil && ended! == nil), "Teams-silent → session ended")
+        }
+
+        // --- 7. Interactive session persists on output alone (mute-safe) ---
+        s.check("MeetingDetector tick: active interactive session persists while only output runs") { s in
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(), now: 0)
+            _ = det.tick(snapshot: teams(), now: 0)  // active
+
+            // Mic released (e.g. mute implementations that stop the input unit):
+            // far-end output alone keeps the session alive.
+            let outputOnly = [AudioProcessState(pid: 200, bundleID: "com.microsoft.teams2",
+                                                isRunningInput: false, isRunningOutput: true)]
+            let r = det.tick(snapshot: outputOnly, now: 5)
+            s.expect(r == nil, "output-only during active interactive session → still active")
+        }
+
+        // --- 8. Broadcast tier: chime-style output needs title + long debounce ---
+        s.check("MeetingDetector tick: broadcast requires strict meeting title; chime never confirms") { s in
+            func outputOnlyTeams() -> [AudioProcessState] {
+                [AudioProcessState(pid: 200, bundleID: "com.microsoft.teams2",
+                                   isRunningInput: false, isRunningOutput: true)]
+            }
+
+            // Hub-only windows: meetingTitleProvider returns nil → signal none.
+            let noWindow = MeetingDetector(
+                snapshotProvider: { [] },
+                meetingTitleProvider: { _ in nil },
+                policy: MeetingDetectionPolicy(startDebounce: 0, broadcastStartDebounce: 30, endDebounce: 0)
+            )
+            for t in stride(from: 0.0, through: 60.0, by: 3.0) {
+                let r = noWindow.tick(snapshot: outputOnlyTeams(), now: t)
+                s.expect(r == nil, "output-only without meeting window never detects (t=\(t))")
+            }
+
+            // Meeting window exists: confirms only after the broadcast debounce.
+            let townHall = MeetingDetector(
+                snapshotProvider: { [] },
+                meetingTitleProvider: { _ in "Digital Town Hall" },
+                policy: MeetingDetectionPolicy(startDebounce: 0, broadcastStartDebounce: 30, endDebounce: 0)
+            )
+            s.expect(townHall.tick(snapshot: outputOnlyTeams(), now: 0) == nil, "t=0: confirming")
+            s.expect(townHall.tick(snapshot: outputOnlyTeams(), now: 15) == nil, "t=15: chime-linger territory, still confirming")
+            let confirmed = townHall.tick(snapshot: outputOnlyTeams(), now: 31)
+            guard let d = confirmed?.flatMap({ $0 }) else {
+                s.expect(false, "t=31: broadcast confirmed after 30s debounce"); return
+            }
+            s.expectEqual(d.tier, .broadcastCandidate, "detection carries broadcast tier")
+        }
+
+        // --- 9. Title-change split for back-to-back meetings ---
+        s.check("MeetingDetector tick: stable title change splits back-to-back meetings") { s in
+            final class TitleBox: @unchecked Sendable {
+                private let lock = NSLock()
+                private var value: String? = "Meeting One"
+                var title: String? {
+                    get { lock.withLock { value } }
+                    set { lock.withLock { value = newValue } }
+                }
+            }
+            let box = TitleBox()
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                meetingTitleProvider: { _ in box.title },
+                titleChangeStability: 6,
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(), now: 0)
+            let first = det.tick(snapshot: teams(), now: 0)
+            s.expect(first?.flatMap { $0 } != nil, "first meeting active")
+
+            // Title flips to the next meeting; audio never drops.
+            box.title = "Meeting Two"
+            s.expect(det.tick(snapshot: teams(), now: 10) == nil, "changed title pending (t=10)")
+            s.expect(det.tick(snapshot: teams(), now: 13) == nil, "still inside stability window (t=13)")
+            let split = det.tick(snapshot: teams(), now: 17)
+            guard let d = split?.flatMap({ $0 }) else {
+                s.expect(false, "stable new title → split emitted"); return
+            }
+            s.expectEqual(d.app.displayName, "Microsoft Teams", "new detection for same app")
+
+            // A momentary flip back (PiP/z-order noise) must NOT split again.
+            box.title = "Meeting One"
+            s.expect(det.tick(snapshot: teams(), now: 18) == nil, "blip pending")
+            box.title = "Meeting Two"
+            s.expect(det.tick(snapshot: teams(), now: 19) == nil, "pending cleared, no split")
+
+            // Title disappearing (window minimized) never splits or ends.
+            box.title = nil
+            s.expect(det.tick(snapshot: teams(), now: 25) == nil, "nil title → no effect")
         }
     }
 
@@ -1908,6 +2233,25 @@ struct AlembicCheck {
                 exclusions: []
             )
             s.expectEqual(result, "A longer title wins", "longest wins with empty exclusions")
+        }
+
+        s.check("bestTitle strict mode: all-excluded returns nil (detection gate)") { s in
+            // Only hub windows on screen (a chime false-positive scenario):
+            // strict mode must report "no meeting window", not fall back.
+            let hubOnly = MeetingContext.bestTitle(
+                from: ["Chat | Alice | Microsoft Teams", "Calendar | Microsoft Teams"],
+                exclusions: ["Chat", "Calendar"],
+                exclusionFallback: false
+            )
+            s.expect(hubOnly == nil, "strict: all-excluded → nil")
+
+            // A real meeting window survives strict exclusion.
+            let withMeeting = MeetingContext.bestTitle(
+                from: ["Chat | Alice | Microsoft Teams", "Weekly Sync | Microsoft Teams"],
+                exclusions: ["Chat", "Calendar"],
+                exclusionFallback: false
+            )
+            s.expectEqual(withMeeting, "Weekly Sync | Microsoft Teams", "strict: meeting window found")
         }
 
         // Verify Teams catalog entry exposes the expected nonMeetingTitlePrefixes.

@@ -26,6 +26,11 @@ public enum SessionState: Sendable, Equatable {
     /// A permission or pipeline error was surfaced. The transcript-so-far has
     /// been flushed/closed on a best-effort basis so partial work survives.
     case error(String)
+    /// The session self-discarded: it was started with a silent-discard window
+    /// (auto-started sessions), produced no finalized far-end ("them") speech
+    /// within it, and its transcript files were deleted. The associated value
+    /// is a short human-readable reason.
+    case discarded(String)
 }
 
 /// The platform-neutral orchestrator that runs one meeting transcription
@@ -120,6 +125,7 @@ public final class MeetingSession {
     @ObservationIgnored private var resultTasks: [SourceTag: Task<Void, Never>] = [:]
     @ObservationIgnored private var meterTask: Task<Void, Never>?
     @ObservationIgnored private var errorTask: Task<Void, Never>?
+    @ObservationIgnored private var discardTask: Task<Void, Never>?
 
     /// Continuations waiting for the session to reach a terminal state.
     @ObservationIgnored private var terminalWaiters: [CheckedContinuation<Void, Never>] = []
@@ -178,7 +184,13 @@ public final class MeetingSession {
     /// writer, begins capture, and spins up the consumption tasks. On any setup
     /// failure the session transitions to `.error` (best-effort flushing any
     /// writer already opened) rather than crashing.
-    public func start(target: CaptureTarget) async {
+    ///
+    /// - Parameter discardIfSilentAfter: when non-nil, a watchdog checks the
+    ///   transcript after this many seconds; if no finalized far-end ("them")
+    ///   event has arrived the session drains, deletes its files, and enters
+    ///   `.discarded`. Pass it only for auto-started sessions — a deliberate
+    ///   manual recording must never self-destruct.
+    public func start(target: CaptureTarget, discardIfSilentAfter: TimeInterval? = nil) async {
         guard state == .idle || state == .selecting else { return }
 
         selectedTarget = target
@@ -227,6 +239,14 @@ public final class MeetingSession {
 
         startConsumptionTasks()
         transition(to: .recording)
+
+        if let window = discardIfSilentAfter {
+            discardTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(window))
+                guard !Task.isCancelled else { return }
+                await self?.discardIfStillSilent()
+            }
+        }
     }
 
     private func startConsumptionTasks() {
@@ -346,6 +366,24 @@ public final class MeetingSession {
         guard state == .recording else { return }
         transition(to: .finalizing)
 
+        let (savedURL, _) = await drainAndClose()
+
+        // 7: saved.
+        if let savedURL {
+            transition(to: .saved(savedURL))
+        } else {
+            transition(to: .error("Session stopped without an output file"))
+        }
+    }
+
+    /// Steps 2–6 of the drain: stop capture, deliver every chunk, finish both
+    /// engines, ingest every finalized result, and only then close the writer.
+    /// Returns the canonical and readable transcript URLs (nil when no writer
+    /// was open). Shared by `stop()` and the silent-session discard path.
+    private func drainAndClose() async -> (canonical: URL?, readable: URL?) {
+        discardTask?.cancel()
+        discardTask = nil
+
         // 2 + 3: stop capture, then ensure every chunk reached its engine.
         await audioSource.stop()
         await bufferTask?.value
@@ -368,16 +406,46 @@ public final class MeetingSession {
         errorTask?.cancel(); errorTask = nil
 
         // 6: close the writer only after every finalized result is consumed.
-        let savedURL = writer?.outputURL
+        let canonical = writer?.outputURL
+        let readable = writer?.readableURL
         await writer?.close()
         writer = nil
+        return (canonical, readable)
+    }
 
-        // 7: saved.
-        if let savedURL {
-            transition(to: .saved(savedURL))
-        } else {
-            transition(to: .error("Session stopped without an output file"))
+    // MARK: - Silent-session discard (auto-started sessions only)
+
+    /// Watchdog body: if the session is still recording and has produced no
+    /// finalized far-end speech, drain it, delete its transcript files, and
+    /// transition to `.discarded`. Re-checks after the drain so a first "them"
+    /// segment that was in flight while draining is never deleted.
+    private func discardIfStillSilent() async {
+        guard state == .recording else { return }
+        guard !hasFarEndSpeech else { return }
+
+        transition(to: .finalizing)
+        let (canonical, readable) = await drainAndClose()
+
+        // Trailing finalized results may have landed during the drain — if any
+        // are far-end speech this was a real (quiet-start) meeting; keep it.
+        if hasFarEndSpeech {
+            if let canonical {
+                transition(to: .saved(canonical))
+            } else {
+                transition(to: .error("Session stopped without an output file"))
+            }
+            return
         }
+
+        if let canonical { try? FileManager.default.removeItem(at: canonical) }
+        if let readable { try? FileManager.default.removeItem(at: readable) }
+        outputURL = nil
+        transition(to: .discarded("no far-end speech detected"))
+    }
+
+    /// Whether any finalized far-end ("them") event has been ingested.
+    private var hasFarEndSpeech: Bool {
+        finalizedTranscript.contains { $0.source == .them }
     }
 
     // MARK: - Error handling
@@ -388,6 +456,7 @@ public final class MeetingSession {
         // Ignore once the session is already terminal.
         if case .saved = state { return }
         if case .error = state { return }
+        if case .discarded = state { return }
         await flushAndClose()
         fail(with: "Capture error: \(message)")
     }
@@ -395,6 +464,7 @@ public final class MeetingSession {
     /// Best-effort teardown that flushes and closes the writer and cancels live
     /// tasks, used on error paths so a partial transcript is preserved on disk.
     private func flushAndClose() async {
+        discardTask?.cancel(); discardTask = nil
         bufferTask?.cancel(); bufferTask = nil
         for (_, task) in resultTasks { task.cancel() }
         resultTasks = [:]
@@ -425,7 +495,7 @@ public final class MeetingSession {
 
     private static func isTerminal(_ state: SessionState) -> Bool {
         switch state {
-        case .saved, .error: return true
+        case .saved, .error, .discarded: return true
         default: return false
         }
     }
