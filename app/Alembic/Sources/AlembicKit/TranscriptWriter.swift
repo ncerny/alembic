@@ -10,7 +10,9 @@ import Foundation
 /// crash mid-meeting still leaves a usable, fully parseable transcript on disk.
 ///
 /// Optionally it also emits a human-readable render (`.md`) alongside the
-/// canonical file, with lines of the form `[hh:mm:ss] source: text`.
+/// canonical file, with lines of the form `[hh:mm:ss] source: text`, or
+/// `[hh:mm:ss] <displayName> (<source>): text` when the segment carries a
+/// resolved `attribution.displayName`.
 ///
 /// ## Canonical schema decision
 /// The `.jsonl` is **uniform: one `FinalizedSegmentDTO` per line, nothing else.**
@@ -240,11 +242,24 @@ public actor TranscriptWriter {
             .joined(separator: "-")
     }
 
-    /// Renders a finalized segment as a human-readable line:
-    /// `[hh:mm:ss] source: text`, deriving `hh:mm:ss` from the segment `start`
-    /// (session-relative seconds).
+    /// Renders a finalized segment as a human-readable line, deriving
+    /// `hh:mm:ss` from the segment `start` (session-relative seconds):
+    ///
+    /// - With a non-empty (after trimming) `attribution.displayName`:
+    ///   `[hh:mm:ss] <displayName> (<source>): text`.
+    /// - Otherwise (no attribution, or no/blank `displayName`): unchanged
+    ///   `[hh:mm:ss] source: text`.
+    ///
+    /// A blank/whitespace-only `displayName` is treated the same as `nil`
+    /// defensively; this does not mutate the stored attribution, only the
+    /// rendered string.
     static func readableLine(for dto: FinalizedSegmentDTO) -> String {
-        "[\(timestamp(from: dto.start))] \(dto.source.rawValue): \(dto.text)"
+        let stamp = timestamp(from: dto.start)
+        if let name = dto.attribution?.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !name.isEmpty {
+            return "[\(stamp)] \(name) (\(dto.source.rawValue)): \(dto.text)"
+        }
+        return "[\(stamp)] \(dto.source.rawValue): \(dto.text)"
     }
 
     /// Formats session-relative seconds as zero-padded `hh:mm:ss`.

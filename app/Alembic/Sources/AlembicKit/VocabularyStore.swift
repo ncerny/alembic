@@ -342,7 +342,7 @@ public enum VocabularyStore {
             if parts.count == 2 {
                 // Provide "First Last" phrase — contextualStrings works well
                 // with full names in natural speech order.
-                results.append("\(parts[1]) \(parts[0])")
+                results.append(naturalOrder(from: name))
             }
         } else {
             let parts = name
@@ -355,5 +355,41 @@ public enum VocabularyStore {
         }
 
         return results
+    }
+
+    /// Expands a "Last, First" formatted name to natural ("First Last") order.
+    /// Returns the input trimmed, unchanged, if it does not match the
+    /// two-part comma-separated shape (e.g. no comma, or more than two
+    /// non-empty parts).
+    ///
+    /// Extracted from `expandName(_:)`'s existing comma-handling so
+    /// `SpeakerNameNormalizer` (speaker-attribution feature, Phase 2) can
+    /// reuse the exact same "Last, First" → natural-order rule instead of
+    /// reimplementing it (DR-4). `expandName(_:)`'s own two-part check above
+    /// already filters to `parts.count == 2` before calling this, so the
+    /// call site's behavior/output is unchanged.
+    public static func naturalOrder(from name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains(",") else { return trimmed }
+        // Phase 7 §3a fix (Phase 2 impl-review-1 LOW finding): filter with the
+        // same `count >= 2` threshold `expandName(_:)`'s comma branch already
+        // applies to its own split of the same string, not a looser
+        // `!$0.isEmpty`. Before this fix, a three-part name like
+        // `"Kim, Alex, M"` would have `expandName` filter its own split down
+        // to two `count >= 2` parts (`["Kim", "Alex"]`, dropping the
+        // single-character `"M"`) and, seeing `parts.count == 2`, delegate to
+        // this function — which then re-split the *original* string with a
+        // looser `!isEmpty` filter, got back all three parts, found
+        // `parts.count != 2`, and returned the name unchanged instead of
+        // `"Alex Kim"`: a silent parity regression between the caller's
+        // two-part decision and this helper's own recomputation of "parts".
+        // Applying the identical filter here keeps both call sites' notion
+        // of "parts" provably in sync.
+        let parts = trimmed
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.count >= 2 }
+        guard parts.count == 2 else { return trimmed }
+        return "\(parts[1]) \(parts[0])"
     }
 }

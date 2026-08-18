@@ -141,10 +141,119 @@ box only when the **Expected result** is observed.
       ```
       **Expected:** **no matches** — the sources contain no networking code.
 
+## 10. Speaker attribution — calibration & validation (Teams, opt-in)
+
+This section is the manual, live-meeting-gated workflow for the opt-in speaker-attribution feature
+(`docs/2-speaker-attribution/spec.md`). It is separate from §1–§9 above: the feature ships **off by
+default** and stays disabled in Settings until calibration has been completed for at least one layout.
+See `.copilot-tracking/plans/2026-08-17/speaker-attribution-phase-7-plan.md` §2/§4 for the full
+rationale and repo-root `docs/2-speaker-attribution/calibration-record.md` for the committed evidence.
+
+**Scope as of 2026-08-18:** calibrated for strict macOS Teams 1-on-1, three-person, and one
+seven-person 4-over-3 Gallery layout. Environment: **macOS 26.5.1 (build 25F80)**, **Teams
+26149.1804.4788.5681**. The Gallery pass used 2400×926 frames, observed two different active speakers
+and one no-outline interval, and verified cropped-label OCR. Candidate frame-shape and exact marker
+geometry keep shared-content, side-panel, other participant counts, resized, and unknown layouts fail
+closed. Original AC-4 end-to-end transcript validation passed in the three-person layout.
+
+### 10a. One-time calibration (COMPLETE for 1-on-1, three-person, and seven-person Gallery — 2026-08-18)
+
+- [x] Joined a live Teams 1-on-1 meeting (one other participant) in the full-frame primary-tile layout.
+- [x] Ran `swift run AlembicCheck frame-dump com.microsoft.teams --list-windows` to confirm the live
+      meeting window's exact title (or `CGWindowID`) — required because `frame-dump` fails closed on
+      bundle-prefix-only input for Teams (no static title hints exist for it).
+- [x] Ran `swift run AlembicCheck frame-dump com.microsoft.teams --meeting-title "<confirmed
+      title-prefix>"` `--frames 10 --out app/Alembic/.frame-dump-scratch/live-calibration-remote-20260818`
+      (gitignored scratch directory). A sensitive-data warning printed before capture, a `manifest.json`
+      listed every written file as `"sensitive": true"`, and both text/geometry `.txt` reports and
+      (`--include-images`) PNGs were written.
+- [x] Compared each `frame-N.txt` OCR bounding box for the (known, not recorded here) participant's name
+      against `SpeakerLabelCatalog.teamsDefaults`'s label region; noted actual pixel offsets — see
+      `docs/2-speaker-attribution/calibration-record.md`, Calibration Pass #1, for the sanitized numeric
+      evidence.
+- [x] Captured a seven-person 4-over-3 Gallery view at 2400×926. Frames 1–8 outlined one top-row
+      participant, frame 9 had no outline, and frame 10 outlined a different top-row participant.
+      Cropped-label Vision OCR recognized both active labels at confidence 1.0.
+- [x] Captured a three-person layout at 2400×926 with both remote speakers independently active,
+      two crosstalk frames, and multiple no-outline frames. Added only the two remote tile candidates.
+- [x] Hand-edited `Sources/AlembicKit/SpeakerLabelCatalog.swift`'s `teamsDefaults` literals to the
+      measured 1-on-1 geometry; removed the previously-unmeasured, speculative grid-view candidates
+      entirely (not merely left unvalidated). A first pass's speculative left-edge, 20%-wide
+      `.highlightColor` sample (`#6264A7`) never matched, but a corrected, narrow re-measurement (a
+      single 1px-wide pixel column at frame-x=3) found the real active-tile outline: `#797EE5` on
+      active-speaking frames vs. a distinctly different neutral color on inactive frames at the same
+      pixels. The shipped marker is that corrected, measured `.highlightColor` value — never an
+      unconditional/"trivially active" marker kind, which was considered and explicitly rejected.
+- [x] Authored the committed calibration record (repo-root `docs/2-speaker-attribution/calibration-record.md`)
+      with the numeric measurements, view mode tested, frame dimensions, title fragment, marker
+      color/tolerance, macOS/Teams build numbers, and a manifest SHA-256 integrity reference —
+      **no raw screenshots, no raw participant names**.
+- [x] Kept `markersValidated == true` after adding the measured Gallery candidates, a strict
+      2.57–2.61 frame-aspect signature, and the measured `#8288FC` top-outline marker.
+- [x] Updated (not deleted) the calibration canary: `checkMarkersValidatedRequiresManualCalibration` is
+      now `checkTeamsOneOnOneCalibrationEvidence`, asserting `markersValidated == true` **and** that the
+      committed calibration record exists and documents this exact evidence (date, frame dimensions,
+      title fragment) — see that check's doc comment in `AlembicCheck.swift`. Added
+      `checkTeamsOneOnOneMarkerCalibration` (the measured marker color match/nonmatch proof) and
+      `checkAppModelAttributionGateAudit` (a structural audit locking `AppModel.start()`'s
+      `attributionGated` to the conjunction of `markersValidated` AND `matchesLayout(meetingTitle:)`).
+- [x] Re-ran `swift run AlembicCheck` — full suite green (1550 checks passed, 0 failed),
+      and the release build plus signed app-bundle build completed successfully.
+- [x] Deleted every scratch frame-dump directory used for the calibration passes (they contained real participant
+      names/OCR text and raw PNGs — do not commit or retain them), then ran
+      `git status --ignored --short` from the repo root and confirmed the scratch directory does not
+      appear as an untracked/staged file.
+
+### 10b. End-to-end attribution validation — supported layouts
+
+**Complete.** A live three-person Teams recording satisfied original AC-4.
+
+- [x] Enable the attribution toggle in Settings (now enabled since a `markersValidated` entry exists).
+      **Expected:** the copy states on-device/no-data-leaves-the-Mac (UR-2) and the approximate-names
+      caveat (UR-3).
+- [x] Join a calibrated three-person Teams meeting.
+- [x] Confirm at least one far-end segment is attributed with the correct participant name and
+      `attribution.source == "vision"`.
+- [x] Confirm ambiguous/off-screen cases fall
+      back to plain `them`, with no dropped or corrupted segments (SR-12's no-guess posture).
+- [x] **Evidence handling — sanitized only, nothing raw committed or shared.** The resulting `.jsonl`
+      and rendered `.md` for this session **MUST NOT** be committed to the repository, attached to a
+      PR, pasted into an issue/chat, or otherwise shared. Retain them **locally only**, and only for as
+      long as needed:
+      1. Spot-check locally with the `python3 -m json.tool`-style line validation from §5, filtering
+         for `"source":"vision"`, and confirm the known participant's correct name appears at least once.
+      2. Author the **committed** evidence instead: a sanitized entry in "End-to-End Validation Pass #1"
+         of `docs/2-speaker-attribution/calibration-record.md` recording — numbers and pass/fail only, no
+         transcript text — the session date, segment counts (total / `source == "vision"` / `them`
+         fallback), and (only if useful) a minimal, hand-redacted JSON snippet with the participant's
+         actual name replaced by a placeholder. A SHA-256 hash of the local `.jsonl` MAY be recorded
+         alongside as a non-reversible integrity reference.
+      3. **Cleanup:** delete the local `.jsonl`/`.md` evidence files once the calibration-record entry is
+         written; confirm via `git status --short` that no transcript file was staged or committed.
+- [ ] Disable the toggle; confirm the very next recording's `.jsonl`/`.md` is identical in shape to the
+      pre-feature baseline. **Note:** this manual disable-and-observe step is a **non-authoritative
+      smoke check only** — the byte-for-byte requirement is proven authoritatively by the deterministic
+      `checkOffToggleByteIdenticalOutput` case in `swift run AlembicCheck`.
+- [x] **Cleanup:** confirm any frame-dump scratch directory has been deleted and does not reappear as a
+      side effect of this end-to-end session (`git status --ignored --short` clean).
+
+### 10c. NOT SUPPORTED — other Gallery sizes, shared content, and side panels
+
+Only the measured three-person and seven-person 4-over-3 Gallery geometries are supported.
+Shared-content views, participant rails, transcript/chat side panels, other participant counts, and materially resized
+windows remain unsupported. They produce no attribution unless a future calibration pass adds a
+distinct frame signature, candidate geometry, marker evidence, and OCR validation.
+
 ## Sign-off
 
 - [ ] **Acceptance:** a real Teams meeting produced an accurate, timestamped
       canonical `.jsonl` + readable `.md` under `~/Documents/Alembic/`, with no
       unexpected network egress, no 1-minute reset, and `dropped == 0`.
+- [x] **Speaker attribution — calibration (§10a):** complete for strict 1-on-1, three-person, and
+      seven-person 4-over-3 Gallery. Sanitized evidence is in Calibration Passes #1–#3.
+- [x] **Speaker attribution — end-to-end validation (§10b):** original AC-4 passed with 9 correct
+      Vision-attributed segments and zero wrong-name segments.
+- [ ] **Other layouts (§10c):** not supported or claimed; future support requires separate live
+      calibration evidence.
 
 Tester: ___________________  Date: ___________  macOS build: ___________

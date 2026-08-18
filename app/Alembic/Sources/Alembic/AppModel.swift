@@ -87,6 +87,20 @@ final class AppModel {
     /// run this launch. Surfaced in the menu so the outcome is never silent.
     private(set) var disclosureStatus: String?
 
+    // MARK: Speaker attribution (not observed except the diagnostic text)
+
+    /// Owns the current `start()` call's `VisionSpeakerAttributor` plus its
+    /// background tasks, when speaker attribution was engaged for this run
+    /// (`nil` otherwise — the common case until `SpeakerLabelCatalog` ships a
+    /// `markersValidated` entry). See `AttributionRuntime` below.
+    @ObservationIgnored private var attributionRuntime: AttributionRuntime?
+
+    /// The single most recent `attributionDiagnostics` entry (non-fatal
+    /// video-only status, e.g. "no meeting window resolved"), or `nil` when
+    /// none has fired this run. A bounded status indicator, not a log —
+    /// cleared at the start of every eligible `start()` call.
+    private(set) var attributionDiagnostic: String?
+
     // MARK: Auto-start detector (not observed)
 
     @ObservationIgnored private var detector: MeetingDetector?
@@ -126,22 +140,29 @@ final class AppModel {
 
     // MARK: - Composition root
 
-    /// Builds a fully wired production ``MeetingSession``.
+    /// Builds a fully wired production ``MeetingSession`` around `source`,
+    /// optionally injecting `attributionProvider` (Phase 6). Shared by
+    /// ``makeSession(localeBox:vocabularyBox:contextBox:)`` (the audio-only,
+    /// synchronous, `init()`-time factory) and the attribution-engaged path in
+    /// ``start()`` so both construct the engine/writer/clock wiring identically
+    /// — this is the single place a ``MeetingSession`` is assembled.
     ///
-    /// This is the single bridge between SwiftUI/AppKit and the macOS platform
-    /// adapters. It:
-    /// - uses `ScreenCaptureKitSource` as the audio source,
-    /// - feeds the source's live `meterUpdates` straight into the orchestrator,
-    /// - maps the source's typed `errors` channel onto the orchestrator's plain
+    /// It:
+    /// - feeds `source`'s live `meterUpdates` straight into the orchestrator,
+    /// - maps `source`'s typed `errors` channel onto the orchestrator's plain
     ///   `String` error stream (the orchestrator is Apple-free by contract),
     /// - builds one `SpeechAnalyzerEngine` per `SourceTag` against the locale
     ///   resolved by preflight (read from `localeBox` at start time),
     /// - opens a `TranscriptWriter` under `~/Documents/Alembic/`, and
     /// - anchors the session clock origin on the same monotonic host-time basis
     ///   the source uses (`HostClock.now()`), so engine/source times align.
-    private static func makeSession(localeBox: LocaleBox, vocabularyBox: VocabularyBox, contextBox: MeetingContextBox) -> MeetingSession {
-        let source = ScreenCaptureKitSource()
-
+    private static func buildSession(
+        source: ScreenCaptureKitSource,
+        attributionProvider: (any AttributionProvider)?,
+        localeBox: LocaleBox,
+        vocabularyBox: VocabularyBox,
+        contextBox: MeetingContextBox
+    ) -> MeetingSession {
         // Map CaptureSourceError -> String for the platform-neutral orchestrator.
         let sourceErrors = source.errors
         let mappedErrors = AsyncStream<String> { continuation in
@@ -173,8 +194,51 @@ final class AppModel {
             makeWriter: makeWriter,
             meterUpdates: source.meterUpdates,
             sourceErrors: mappedErrors,
-            clockOrigin: { HostClock.now() }
+            clockOrigin: { HostClock.now() },
+            attributionProvider: attributionProvider
         )
+    }
+
+    /// Builds a fully wired production ``MeetingSession`` with an audio-only
+    /// `ScreenCaptureKitSource` and no attribution provider — the **only**
+    /// factory `init()` calls, and the base (terminal-only-gated) rebuild
+    /// factory inside `start()`. Stays synchronous and target-independent
+    /// (Phase 6, §0.2): attribution wiring is target-dependent and needs an
+    /// `async` step (`setExpectedMeetingTitle`), so it lives in the separate
+    /// ``makeAttributionRuntime(target:meetingTitle:)`` factory instead, called
+    /// only from `start()`, never from here.
+    private static func makeSession(localeBox: LocaleBox, vocabularyBox: VocabularyBox, contextBox: MeetingContextBox) -> MeetingSession {
+        buildSession(
+            source: ScreenCaptureKitSource(),
+            attributionProvider: nil,
+            localeBox: localeBox,
+            vocabularyBox: vocabularyBox,
+            contextBox: contextBox
+        )
+    }
+
+    /// Builds the attribution-mode capture source plus its owned
+    /// ``AttributionRuntime`` for a `start()` call that has already decided
+    /// attribution is engaged (§0.4's gate: toggle on, `SpeakerLabelCatalog.
+    /// match(bundleID:)?.markersValidated == true`, **and** the resolved
+    /// meeting title matches that entry's `layoutRequirement` — §0.5) —
+    /// never invoked speculatively, and never from `init()`.
+    ///
+    /// `setExpectedMeetingTitle(_:)` is called before `source` is used to build
+    /// anything else, satisfying the documented "before `start(target:)`"
+    /// invariant (`ScreenCaptureKitSource`, Phase 4). The same `meetingTitle`
+    /// is also passed to `VisionSpeakerAttributor.init` (one resolution, two
+    /// consumers) so the attributor re-asserts the meeting-window gate itself
+    /// rather than trusting the caller's gating alone (defense in depth).
+    private static func makeAttributionRuntime(
+        target: CaptureTarget,
+        meetingTitle: String?
+    ) async -> (source: ScreenCaptureKitSource, runtime: AttributionRuntime) {
+        let source = ScreenCaptureKitSource(mode: .audioPlusAttribution)
+        await source.setExpectedMeetingTitle(meetingTitle)
+        let attributor = VisionSpeakerAttributor(bundleID: target.id, meetingTitle: meetingTitle, frames: source.frames)
+        let runtime = AttributionRuntime(attributor: attributor)
+        return (source, runtime)
     }
 
     // MARK: - Target enumeration
@@ -199,8 +263,25 @@ final class AppModel {
     /// Runs the one-time model preflight (surfacing progress), then starts the
     /// session against the selected target. Rebuilds a fresh session first when
     /// the previous one already reached a terminal state.
+    ///
+    /// Speaker attribution (Phase 6/7) is engaged for this run only when the
+    /// `alembic.attribution.enabled` toggle is on, `SpeakerLabelCatalog.
+    /// match(bundleID:)?.markersValidated == true`, **and** the resolved
+    /// meeting-window title matches that entry's `layoutRequirement`. The
+    /// attributor then applies per-candidate frame-shape and marker gates for
+    /// the calibrated 1-on-1 and seven-person Gallery layouts.
     func start() async {
         guard let target = selectedTarget, !isPreparingModels else { return }
+
+        // Explicit active-session guard, duplicating `canStart`'s `session.state`
+        // switch verbatim — this must run before any teardown below (in
+        // particular the unconditional `attributionRuntime` cleanup) so that
+        // teardown is provably never racing an active session, not merely
+        // assumed safe. Keep in sync with `canStart`'s `session.state` switch.
+        switch session.state {
+        case .idle, .selecting, .saved, .error, .discarded: break
+        case .recording, .finalizing: return
+        }
 
         // First-run permissions gate: refuse a doomed capture with a clear,
         // actionable message instead of silently no-oping. The three permissions
@@ -256,9 +337,66 @@ final class AppModel {
         // Assemble meeting context off the main actor (CGWindowList can block).
         // isPreparingModels stays true until the context is published so a second
         // start() invocation cannot interleave while the session is still idle.
-        let appHints = MeetingAppCatalog.match(bundleID: target.id)?.app.titleHints ?? []
-        let exclusions = MeetingAppCatalog.match(bundleID: target.id)?.app.nonMeetingTitlePrefixes ?? []
-        let trailingStrips = MeetingAppCatalog.match(bundleID: target.id)?.app.titleTrailingStrips ?? []
+        // `appMatch` is resolved once and reused for the three `fullTitle` inputs
+        // below and for the strict attribution title probe (§0.5) — a distinct
+        // lookup/type from `speakerEntry` (the `markersValidated` gate, §0.4):
+        // `appMatch` has no `markersValidated` field, `speakerEntry` has no
+        // title/hints fields — never conflate the two.
+        let attributionEnabled = UserDefaults.standard.bool(forKey: "alembic.attribution.enabled")
+        let appMatch = MeetingAppCatalog.match(bundleID: target.id)
+        let speakerEntry = SpeakerLabelCatalog.match(bundleID: target.id)
+
+        // Unconditional teardown of any previous run's attribution runtime, for
+        // every start() call reaching this point — not only when this run goes
+        // on to be gated — so a previously-gated run's runtime/diagnostic never
+        // lingers into a subsequent toggle-off or unvalidated-catalog run. Safe
+        // by construction of the active-session guard above: no start() call
+        // can reach this point while session.state was .recording/.finalizing,
+        // so any runtime torn down here was necessarily armed against a session
+        // that has already reached a terminal state.
+        await attributionRuntime?.cleanup()
+        attributionRuntime = nil
+        attributionDiagnostic = nil
+
+        // Two independent gates, evaluated in order (§0.4/§0.5): (1) the
+        // toggle + calibration gate (unrelated to which specific meeting is
+        // about to be joined — cheap, checked first, no window-title probe
+        // needed to answer it), then (2) the resolved meeting-window gate
+        // (catalog data, not a hard-coded Teams special case —
+        // `SpeakerLabelCatalog.AppEntry.matchesLayout(meetingTitle:)`). Both
+        // must hold before video is upgraded to `.audioPlusAttribution` or
+        // `VisionSpeakerAttributor` is constructed. Per-frame catalog
+        // signatures then fail closed for unsupported on-screen layouts.
+        let calibrationGated = attributionEnabled && (speakerEntry?.markersValidated ?? false)
+        let meetingTitle: String? = calibrationGated
+            ? await Task.detached(priority: .userInitiated) {
+                appMatch.flatMap { WindowTitleProbe.meetingWindowTitle(for: $0) }
+            }.value
+            : nil
+        let attributionGated = calibrationGated && (speakerEntry?.matchesLayout(meetingTitle: meetingTitle) ?? false)
+
+        // Augmented rebuild (only when attributionGated): construct the
+        // attribution-mode capture source + owned runtime and rebuild `session`
+        // a second time around it. When !attributionGated, this is skipped
+        // entirely — `session` is left exactly as the base rebuild produced it,
+        // and `attributionRuntime` stays nil (already cleared above).
+        var attributionSource: ScreenCaptureKitSource?
+        if attributionGated {
+            let (source, runtime) = await AppModel.makeAttributionRuntime(target: target, meetingTitle: meetingTitle)
+            session = AppModel.buildSession(
+                source: source,
+                attributionProvider: runtime.attributor,
+                localeBox: localeBox,
+                vocabularyBox: vocabularyBox,
+                contextBox: contextBox
+            )
+            attributionRuntime = runtime
+            attributionSource = source
+        }
+
+        let appHints = appMatch?.app.titleHints ?? []
+        let exclusions = appMatch?.app.nonMeetingTitlePrefixes ?? []
+        let trailingStrips = appMatch?.app.titleTrailingStrips ?? []
         let windowTitle = await Task.detached(priority: .userInitiated) {
             WindowTitleProbe.fullTitle(forBundleID: target.id, appHints: appHints, exclusions: exclusions, trailingStrips: trailingStrips)
         }.value
@@ -276,6 +414,49 @@ final class AppModel {
         let discardWindow: TimeInterval? = autoStartedTarget != nil ? AppModel.silentDiscardWindow : nil
         await session.start(target: target, discardIfSilentAfter: discardWindow)
         isPreparingModels = false
+
+        if attributionGated {
+            // Review-4 fix: only arm the runtime's lifecycle when `session.start`
+            // actually reached `.recording`. On any other resulting state (engine
+            // start / writer-open / capture-start failure all transition to
+            // `.error` inside `MeetingSession.start` and return before this
+            // point) there is nothing to watch — arming would leave a lifecycle
+            // task waiting on a session that is already terminal, so clean up
+            // and clear the runtime instead of arming it.
+            if case .recording = session.state, let attributionSource {
+                attributionRuntime?.armLifecycle(
+                    session: session,
+                    diagnostics: attributionSource.attributionDiagnostics,
+                    onDiagnostic: { [weak self] text in
+                        self?.attributionDiagnostic = text
+                        print("[alembic] Attribution diagnostic: \(text)")
+                    }
+                )
+            } else {
+                // Phase 7 §3e fix (Phase 6 impl-review-1 MEDIUM-1): capture the
+                // runtime to clean up and clear `attributionRuntime` in one
+                // synchronous step, *before* the `await` below — `isPreparingModels`
+                // is already `false` at this point (set just above), so a fast
+                // concurrent `start()` call can pass this function's entry guard
+                // and construct+assign a *new* `attributionRuntime` while this
+                // branch's cleanup is suspended. Re-reading the shared property
+                // after that `await` (the previous shape:
+                // `await attributionRuntime?.cleanup(); attributionRuntime = nil`)
+                // would nil out that newer runtime instead of the one actually
+                // being cleaned up, leaking the newer runtime's
+                // `VisionSpeakerAttributor`/frame stream. Capturing into a local
+                // binding first, and only ever clearing/awaiting on that local
+                // capture, makes the hand-off atomic from a concurrent start()'s
+                // point of view: it either observes `attributionRuntime == nil`
+                // (already handed off here) or the pre-existing runtime — never a
+                // runtime this branch is about to silently drop.
+                let runtimeToCleanup = attributionRuntime
+                attributionRuntime = nil
+                attributionDiagnostic = nil
+                await runtimeToCleanup?.cleanup()
+            }
+        }
+
         // Fire-and-forget: the disclosure poster retries for several seconds
         // while the meeting UI settles, so it must not block start()'s caller
         // (the detection handler) — otherwise back-to-back meeting transitions
@@ -529,6 +710,8 @@ final class AppModel {
 
     /// Start is allowed with a target chosen, not mid-preflight, and the session
     /// idle/selecting or already finished (a finished session is rebuilt).
+    /// Keep in sync with `start()`'s explicit active-session guard, which
+    /// duplicates this `session.state` switch verbatim.
     var canStart: Bool {
         guard selectedTarget != nil, !isPreparingModels else { return false }
         switch session.state {
@@ -585,6 +768,78 @@ final class AppModel {
         case .saved, .error, .discarded: return true
         default: return false
         }
+    }
+}
+
+/// Owns a single `start()` call's `VisionSpeakerAttributor` plus its two
+/// background tasks (a session-end lifecycle watcher and a diagnostics
+/// consumer), so there is exactly one place — ``cleanup()`` — that cancels
+/// everything for a given attribution-engaged run (Phase 6, §0.7).
+///
+/// `VisionSpeakerAttributor` is a concrete type with its own `stop()` —
+/// `AttributionProvider` (the protocol `MeetingSession` holds) has no `stop()`,
+/// so `MeetingSession` structurally cannot call it. `MeetingSession.stop()` and
+/// its error paths all eventually finish `ScreenCaptureKitSource.frames`, so
+/// the attributor's frame-consumption loop does terminate on its own — but
+/// calling `.stop()` explicitly cancels an in-flight `RecognizeTextRequest`
+/// immediately rather than waiting for the stream to finish naturally.
+///
+/// `@unchecked Sendable`: every access to this type happens from `AppModel`,
+/// which is `@MainActor`-isolated — there is never more than one thread
+/// touching a given instance. The `@unchecked` conformance is what lets
+/// `AppModel.start()` (and its `attributionRuntime?.cleanup()` calls) `await`
+/// this class's async methods without the compiler requiring proof the type
+/// itself synchronizes concurrent access, which it does not need to given
+/// that single-actor discipline.
+private final class AttributionRuntime: @unchecked Sendable {
+    let attributor: VisionSpeakerAttributor
+    private var diagnosticsTask: Task<Void, Never>?
+    private var lifecycleTask: Task<Void, Never>?
+
+    init(attributor: VisionSpeakerAttributor) {
+        self.attributor = attributor
+    }
+
+    /// Starts the diagnostics consumer and the session-end watcher. Captures
+    /// the *specific* session/attributor this runtime was built for as locals,
+    /// so a later resumption can never be misdirected at a different runtime's
+    /// session — even if `AppModel` has since rebuilt `session`/
+    /// `attributionRuntime` again.
+    func armLifecycle(
+        session: MeetingSession,
+        diagnostics: AsyncStream<CaptureSourceError>,
+        onDiagnostic: @escaping @MainActor @Sendable (String) -> Void
+    ) {
+        let watchedSession = session
+        let watchedAttributor = attributor
+        lifecycleTask = Task {
+            await watchedSession.waitUntilFinished()
+            // `waitUntilFinished()` is a plain checked-continuation wait with no
+            // cancellation handler — cancelling this Task does NOT make the
+            // await above return early; it only prevents the `.stop()` call
+            // below from running once the (uncancelled) await does eventually
+            // resume. This guard is what makes cancellation safe, not a
+            // property of `waitUntilFinished()` itself.
+            guard !Task.isCancelled else { return }
+            await watchedAttributor.stop()
+        }
+        diagnosticsTask = Task {
+            for await diagnostic in diagnostics {
+                guard !Task.isCancelled else { break }
+                await onDiagnostic(diagnostic.description)
+            }
+        }
+    }
+
+    /// Cancels both background tasks and stops the attributor immediately.
+    /// Called on every path that discards this runtime, whether or not
+    /// `armLifecycle` ever ran (a `session.start` that fails to reach
+    /// `.recording`; `AppModel`'s rebuild-cancel-previous path at the top of
+    /// every `start()` call).
+    func cleanup() async {
+        diagnosticsTask?.cancel()
+        lifecycleTask?.cancel()
+        await attributor.stop()
     }
 }
 

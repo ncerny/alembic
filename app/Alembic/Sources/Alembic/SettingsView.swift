@@ -20,6 +20,7 @@ struct SettingsView: View {
     @AppStorage(DisclosurePolicy.DefaultsKey.autoSend) private var discloseAutoSend = false
     @AppStorage(DisclosurePolicy.DefaultsKey.teamsOnly) private var discloseTeamsOnly = true
     @AppStorage(DisclosurePolicy.DefaultsKey.message) private var discloseMessage = DisclosurePolicy.defaultMessage
+    @AppStorage("alembic.attribution.enabled") private var attributionEnabled = false
     @State private var accessibilityTrusted = false
 
     init(model: AppModel) {
@@ -144,6 +145,19 @@ struct SettingsView: View {
                     }
                 } header: {
                     Text("Meeting Disclosure")
+                        .font(.headline)
+                        .padding(.bottom, 4)
+                }
+
+                Section {
+                    Toggle("Attempt to name far-end speakers (Microsoft Teams, on-device)", isOn: $attributionEnabled)
+                        .disabled(!attributionAvailable)
+
+                    Text(attributionFootnote)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } header: {
+                    Text("Speaker Attribution")
                         .font(.headline)
                         .padding(.bottom, 4)
                 }
@@ -274,5 +288,38 @@ struct SettingsView: View {
         let total = r.terms.count
         let suffix = r.truncated ? " (truncated to \(VocabularyStore.recommendedMaxTerms))" : ""
         return "→ \(total) term\(total == 1 ? "" : "s")" + suffix
+    }
+
+    // MARK: - Speaker attribution
+
+    /// `true` once at least one `SpeakerLabelCatalog` entry has
+    /// `markersValidated == true` — as of the 2026-08-18 live calibration
+    /// pass, `teamsDefaults` is validated for strict 1-on-1, three-person,
+    /// and the measured seven-person Gallery layout. A plain, recomputed-on-each-
+    /// body-evaluation `Bool`; no caching needed, `entries` is a small static
+    /// array. Gates the toggle itself (`.disabled`) so a user cannot enable a
+    /// control that is structurally guaranteed to produce nothing yet.
+    private var attributionAvailable: Bool {
+        SpeakerLabelCatalog.entries.contains { $0.markersValidated }
+    }
+
+    /// Footnote shown under the Speaker Attribution toggle. When no catalog
+    /// entry is validated yet, a leading "not yet available" status line
+    /// replaces the first sentence; once at least one entry is validated, the
+    /// copy names the specific measured layouts rather than implying general
+    /// Teams support. Candidate frame-shape and marker gates silently no-op
+    /// for unsupported layouts. The
+    /// on-device/no-network/approximate-names sentences stay visible either
+    /// way. The underlying `@AppStorage` value is untouched by the disabled
+    /// state.
+    private var attributionFootnote: String {
+        let common = "Nothing is sent off this Mac. Names may be approximate or missing; " +
+            "transcripts still work when they aren't detected."
+        guard attributionAvailable else {
+            return "Not yet available for any supported app — coming in a future update. " + common
+        }
+        return "Uses on-device Vision to read the active speaker's name label in Microsoft Teams " +
+            "1-on-1 calls, three-person calls, and the calibrated seven-person Gallery layout. Other group sizes, " +
+            "shared-content views, and side-panel layouts behave as if this were off. " + common
     }
 }

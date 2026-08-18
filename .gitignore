@@ -28,3 +28,10 @@ whisper/
 
 # Autonomous-session git worktrees
 .worktrees/
+
+# Alembic frame-dump diagnostic scratch output (Phase 7, SR-22) — may contain
+# real meeting participant names/OCR text (and raw PNG frames if
+# --include-images was used); never committed. See
+# app/Alembic/README.md's "Diagnostics" section and
+# app/Alembic/MANUAL-VALIDATION.md §10a.
+app/Alembic/.frame-dump-scratch/
