@@ -38,11 +38,7 @@ public enum SpeakerNameNormalizer {
     /// the string — never from the interior, so legitimate punctuation inside
     /// a name (`O'Brien`, `Jean-Luc`, `Mary-Jane`) is untouched.
     private static let jitterCharacters = CharacterSet(charactersIn: "•|·-–—:*\u{2022}\u{00B7}")
-    private static let teamsRoleMarkers = [
-        " (Contractor", " Contractor",
-        " (External", " External",
-        " (Guest", " Guest"
-    ]
+    private static let teamsRoleNames = ["contractor", "external", "guest"]
 
     /// Normalizes `raw` into a display-ready name, or `nil` if nothing usable
     /// remains after cleanup (DR-4). Steps, in order:
@@ -83,7 +79,8 @@ public enum SpeakerNameNormalizer {
     public static func normalize(
         _ raw: String,
         roster: [String] = [],
-        rosterConfiguration: RosterConfiguration = .default
+        rosterConfiguration: RosterConfiguration = .default,
+        stripTeamsRoleSuffix: Bool = false
     ) -> String? {
         let jitterAndWhitespace = CharacterSet.whitespacesAndNewlines.union(jitterCharacters)
         // Trimmed twice defensively: a jitter character hiding behind
@@ -101,12 +98,8 @@ public enum SpeakerNameNormalizer {
 
         guard !cleaned.isEmpty else { return nil }
 
-        for marker in teamsRoleMarkers {
-            if let range = cleaned.range(of: marker, options: .caseInsensitive) {
-                cleaned.removeSubrange(range.lowerBound...)
-                cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-                break
-            }
+        if stripTeamsRoleSuffix {
+            cleaned = strippingTeamsRoleSuffix(from: cleaned)
         }
         guard !cleaned.isEmpty else { return nil }
 
@@ -121,6 +114,32 @@ public enum SpeakerNameNormalizer {
 
         guard snapped.count >= 2 else { return nil }
         return snapped
+    }
+
+    private static func strippingTeamsRoleSuffix(from name: String) -> String {
+        guard let comma = name.firstIndex(of: ",") else { return name }
+
+        for role in teamsRoleNames {
+            for marker in [" (\(role)", " \(role)"] {
+                guard let range = name.range(
+                    of: marker,
+                    options: [.caseInsensitive, .backwards]
+                ), range.lowerBound > comma else { continue }
+
+                let firstNamePortion = name[name.index(after: comma)..<range.lowerBound]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !firstNamePortion.isEmpty else { continue }
+
+                let trailingNoise = name[range.upperBound...]
+                guard trailingNoise.count <= 3,
+                      trailingNoise.allSatisfy({ $0.isLetter || $0 == ")" || $0 == "\"" || $0 == "'" })
+                else { continue }
+
+                return String(name[..<range.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return name
     }
 
     // MARK: - Roster snapping

@@ -515,11 +515,16 @@ public actor VisionSpeakerAttributor: AttributionProvider {
     package static func selectName(
         from observations: [OCRObservation],
         minimumConfidence: Double,
-        roster: [String] = []
+        roster: [String] = [],
+        stripTeamsRoleSuffix: Bool = false
     ) -> SpeakerAttributionResult? {
         let survivors: [(name: String, confidence: Double)] = observations.compactMap { observation in
             guard observation.confidence >= minimumConfidence else { return nil }
-            guard let normalized = SpeakerNameNormalizer.normalize(observation.text, roster: roster) else { return nil }
+            guard let normalized = SpeakerNameNormalizer.normalize(
+                observation.text,
+                roster: roster,
+                stripTeamsRoleSuffix: stripTeamsRoleSuffix
+            ) else { return nil }
             return (name: normalized, confidence: observation.confidence)
         }
         guard !survivors.isEmpty else { return nil }
@@ -801,7 +806,8 @@ public actor VisionSpeakerAttributor: AttributionProvider {
             return Self.selectName(
                 from: ocrObservations,
                 minimumConfidence: configuration.minimumOCRConfidence,
-                roster: configuration.roster
+                roster: configuration.roster,
+                stripTeamsRoleSuffix: candidate.requiresLastFirstSeparator
             )
         } catch {
             return nil

@@ -2547,16 +2547,20 @@ struct AlembicCheck {
         }
 
         s.check("SpeakerNameNormalizer.normalize: strips trailing Teams role labels before Last, First expansion") { s in
-            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex (Contractor)"), "Alex Kim",
+            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex (Contractor)", stripTeamsRoleSuffix: true), "Alex Kim",
                           "parenthesized contractor label is not persisted as part of the name")
-            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex Contractor"), "Alex Kim",
+            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex Contractor", stripTeamsRoleSuffix: true), "Alex Kim",
                           "OCR-dropped parentheses still leave a clean name")
-            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex (Contractor"), "Alex Kim",
+            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex (Contractor", stripTeamsRoleSuffix: true), "Alex Kim",
                           "an unmatched opening parenthesis is stripped with the role suffix")
-            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex (Contractori"), "Alex Kim",
+            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex (Contractori", stripTeamsRoleSuffix: true), "Alex Kim",
                           "trailing OCR noise after a recognized role marker is discarded")
-            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex (External)"), "Alex Kim",
+            s.expectEqual(SpeakerNameNormalizer.normalize("Kim, Alex (External)", stripTeamsRoleSuffix: true), "Alex Kim",
                           "external label is stripped conservatively from the end only")
+            s.expectEqual(SpeakerNameNormalizer.normalize("Alex Contractor"), "Alex Contractor",
+                          "generic names are never truncated outside the Teams role-label context")
+            s.expectEqual(SpeakerNameNormalizer.normalize("Contractor, Alex", stripTeamsRoleSuffix: true), "Alex Contractor",
+                          "a legitimate surname matching a role word is preserved")
             s.expectEqual(VocabularyStore.expandName("Kim, Alex").last, "Alex Kim",
                           "expandName's own natural-order output is unchanged by the refactor")
         }
