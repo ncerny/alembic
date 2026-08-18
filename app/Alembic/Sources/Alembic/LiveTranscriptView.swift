@@ -9,8 +9,13 @@ import AlembicKit
 /// render are byte-for-byte consistent.
 enum Presentation {
     /// `[hh:mm:ss] source: text` — the same shape the readable `.md` render uses.
+    // TODO: for attributed events this no longer matches
+    // `TranscriptWriter.readableLine(for:)`'s `[time] Name (them): text` shape/
+    // whitespace-only-name trim-then-fallback behavior (Phase 6 impl-review-1
+    // LOW-1, deferred out of scope in Phase 7 §3 — see that finding). No
+    // functional change made here.
     static func line(for event: TranscriptEvent) -> String {
-        "[\(TranscriptWriter.timestamp(from: event.start))] \(event.source.rawValue): \(event.text)"
+        "[\(TranscriptWriter.timestamp(from: event.start))] \(speakerLabel(for: event)): \(event.text)"
     }
 
     /// Maps a meter RMS (~`[0, 1]`, usually small) to a `[0, 1]` bar fraction.
@@ -34,6 +39,22 @@ enum Presentation {
         case .you: return "You"
         case .them: return "Them"
         }
+    }
+
+    /// Attributed speaker label for `event`, falling back to
+    /// `label(for: event.source)` — i.e. "You"/"Them" — whenever the event
+    /// isn't a `.them` event, carries no attribution, or its `displayName` is
+    /// empty (the normalizer should never produce this, but this presentation
+    /// helper degrades safely regardless). Used by `finalizedRow(_:)`
+    /// (UR-5); `volatileRow(_:)` is untouched since volatile events are never
+    /// attributed (SR-15).
+    static func speakerLabel(for event: TranscriptEvent) -> String {
+        guard event.source == .them,
+              let name = event.attribution?.displayName,
+              !name.isEmpty else {
+            return label(for: event.source)
+        }
+        return name
     }
 }
 
@@ -137,7 +158,7 @@ struct LiveTranscriptView: View {
             Text(TranscriptWriter.timestamp(from: event.start))
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
-            Text(Presentation.label(for: event.source))
+            Text(Presentation.speakerLabel(for: event))
                 .font(.caption.bold())
                 .foregroundStyle(Presentation.color(for: event.source))
             Text(event.text)

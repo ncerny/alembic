@@ -18,14 +18,19 @@ public enum TranscriptKind: String, Sendable, Codable, Hashable, CaseIterable {
 /// provenance *without changing the contract*:
 ///
 /// - `"asr"`     — the speech recognizer itself (default today).
-/// - `"vision"`  — speaker attribution via Vision OCR (deferred; research §9
-///   Approach C / Out of Scope).
+/// - `"vision"`  — speaker attribution via on-device Vision OCR.
 /// - `"graph"`   — Microsoft Graph roster names (deferred).
 ///
 /// Carrying a free-form `source: String` plus an optional `confidence` keeps the
 /// field forward-compatible: new providers add new `source` tokens and richer
 /// confidence without a schema break. `Codable` so it can ride along in the
 /// canonical JSONL when present.
+///
+/// `displayName` is the resolved, normalized speaker name for `"vision"`-sourced
+/// attributions (see `docs/2-speaker-attribution/spec.md`, DR-1). It is an
+/// additive, optional field: `nil` and thus omitted from JSON for every existing
+/// attribution shape, so previously persisted transcripts continue to decode
+/// unchanged.
 public struct TranscriptAttribution: Sendable, Codable, Hashable {
     /// Provider that produced this attribution (e.g. `"asr"`, `"vision"`,
     /// `"graph"`). Free-form by design so new providers don't break the schema.
@@ -34,9 +39,18 @@ public struct TranscriptAttribution: Sendable, Codable, Hashable {
     /// Optional confidence in `[0, 1]`, when the provider supplies one.
     public let confidence: Double?
 
-    public init(source: String, confidence: Double? = nil) {
+    /// Optional resolved speaker display name (Phase 1: schema only; populated
+    /// by a future `AttributionProvider`, e.g. Vision OCR). Additive and
+    /// optional so existing persisted transcripts without this field continue
+    /// to decode unchanged (DR-1/DR-2). Normalized (trimmed, "Last, First"
+    /// expanded) by the producer before being set — this type does not itself
+    /// normalize.
+    public let displayName: String?
+
+    public init(source: String, confidence: Double? = nil, displayName: String? = nil) {
         self.source = source
         self.confidence = confidence
+        self.displayName = displayName
     }
 }
 

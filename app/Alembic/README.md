@@ -85,6 +85,46 @@ swift run AlembicCheck   # AUTHORITATIVE test runner — exits non-zero on failu
 > assertion harness over `AlembicKit`; it exits **non-zero** on any failure and
 > is therefore the real acceptance command for this repo.
 
+## Diagnostics (live probes)
+
+`AlembicCheck` also hosts a small set of **manual, live diagnostics** —
+subcommands that talk to real system state (Accessibility, Screen Recording,
+the microphone) instead of running the deterministic check suite. None of these
+run as part of `swift run AlembicCheck`'s normal (no-argument) invocation, and
+none are part of the automated suite.
+
+| Subcommand | Purpose | Requires |
+|---|---|---|
+| `swift run AlembicCheck audio-watch [seconds]` | Live meter/level watch for the audio pipeline. | Microphone, Screen Recording |
+| `swift run AlembicCheck ax-dump [bundle-prefix] [--out path] [--max-visits n]` | Dumps the Accessibility tree of a running app (default: Teams) — used to re-derive `TeamsChatPoster`'s AX markers after a Teams UI update. | Accessibility |
+| `swift run AlembicCheck frame-dump [bundle-prefix] [--meeting-title <title-prefix> \| --window-id <CGWindowID> \| --list-windows] [--out <path>] [--frames <n>] [--interval <seconds>] [--include-images]` | Captures live Teams meeting frames — **video only, no microphone/Speech Recognition** — and dumps OCR text/bounding boxes plus the catalogued `SpeakerLabelCatalog` regions and marker colors, to re-derive its geometry after a Teams UI change (SR-22). | **Screen Recording only** |
+
+`frame-dump` details:
+
+- Requires an explicit `--meeting-title <title-prefix>` or `--window-id
+  <CGWindowID>` — a bare bundle-prefix is rejected, since Teams has no static
+  title hint to resolve a window from. Run with `--list-windows` first (a
+  non-capturing, read-only enumeration) to discover the exact title/window ID
+  to pass.
+- Output is **text/geometry only by default** — no image bytes are written
+  unless `--include-images` is passed, and `--include-images` requires an
+  explicit `--out` (there is no default output location for image output).
+- When `--out` is omitted (text/geometry mode only), output defaults to a
+  timestamped subdirectory under the gitignored
+  `app/Alembic/.frame-dump-scratch/` diagnostics directory. Any explicit
+  `--out` must resolve either outside the repository entirely or under a
+  gitignored diagnostics directory — a path inside the repo that isn't
+  gitignored is rejected before any capture is attempted.
+- Every run prints a sensitive-data warning and writes a `manifest.json`
+  listing every file produced, each labeled `"sensitive": true` — the output
+  may contain real meeting participant names and on-screen content. Do not
+  commit or share it. After a calibration run, confirm cleanup with
+  `git status --ignored --short` from the repo root.
+- See [MANUAL-VALIDATION.md §10a](MANUAL-VALIDATION.md) for the full one-time
+  calibration procedure this tool supports, and
+  [`docs/2-speaker-attribution/calibration-record.md`](../../docs/2-speaker-attribution/calibration-record.md)
+  for the committed evidence behind any `markersValidated: true` catalog entry.
+
 ## Package structure
 
 The app is a single SwiftPM package (`app/Alembic/Package.swift`) with four
@@ -141,6 +181,49 @@ Settings are stored in `UserDefaults` under:
 - `alembic.vocabulary.filePath`
 - `alembic.vocabulary.folderPath`
 
+### Speaker attribution
+
+An opt-in **speaker attribution** feature (`docs/2-speaker-attribution/spec.md`)
+resolves a display name for far-end (`them`) transcript segments using
+on-device Vision OCR of the meeting app's active-speaker tile — never any
+network call, never any data leaving the machine.
+
+**Scope as of 2026-08-18:** calibrated for strict macOS Teams 1-on-1,
+three-person, and one seven-person 4-over-3 Gallery layout. The Gallery pass captured
+two different active speakers plus a no-outline interval, and verified
+cropped-label OCR at a 2400-pixel capture ceiling. Candidate frame-aspect and
+exact marker-position gates keep shared-content, side-panel, other participant
+counts, resized, and unknown layouts fail closed.
+
+- Controlled by the `alembic.attribution.enabled` `@AppStorage` toggle in
+  Settings. **Off by default**, and the toggle stays **disabled/greyed out in
+  the UI** until `SpeakerLabelCatalog.entries` contains at least one entry with
+  `markersValidated == true`. As of the 2026-08-18 calibration pass,
+  `teamsDefaults` is validated for the measured 1-on-1, three-person, and Gallery layouts — see
+  `AppEntry.matchesLayout(meetingTitle:)`, which `AppModel.start()` and
+  `VisionSpeakerAttributor.init` both consult (independently, defense in
+  depth) before ever upgrading video capture or starting frame consumption.
+  Candidate-specific title, exact frame-size, aspect-ratio, and marker checks
+  then select only the measured 1-on-1, three-person, or seven-person Gallery layout.
+- See [MANUAL-VALIDATION.md §10](MANUAL-VALIDATION.md) for the completed
+  one-time calibration record (§10a), the completed original AC-4 end-to-end validation
+  of the original single-segment AC-4 (§10b), and the remaining unsupported
+  layouts (§10c). See
+  [`docs/2-speaker-attribution/calibration-record.md`](../../docs/2-speaker-attribution/calibration-record.md)
+  for the committed, sanitized numeric evidence (frame dimensions, measured
+  label-region bounds, title fragment) behind the validated catalog entry's
+  geometry/marker literals.
+- Tuning knobs are compile-time defaults on each type's `Configuration`
+  initializer, not exposed in Settings: `ActiveSpeakerTimeline.Configuration
+  .default` (`minConfidence: 0.5`, `minOverlapFraction: 0.6`, `coalesceGap:
+  2.5`, `retentionWindow: 600`) and `VisionSpeakerAttributor.Configuration
+  .default` (`samplingIntervalSeconds: 0.75`, `minimumOCRConfidence: 0.4`,
+  `maxGapSeconds: 2.5`). These are conservative placeholders; live end-to-end
+  validation data (§10b) may suggest different values (an open question this
+  feature's spec tracks as OQ-1) — adjusting them does not require a code
+  change beyond the `Configuration` initializer call sites in
+  `Sources/AlembicKit/Platform/macOS/VisionSpeakerAttributor.swift`.
+
 ## Transcript output
 
 Transcripts are written to:
@@ -174,7 +257,7 @@ Each line (`FinalizedSegmentDTO`, defined in
 | `end` | Double | Session-relative end time in seconds. |
 | `source` | String | `"you"` (microphone) or `"them"` (meeting audio). |
 | `text` | String | Finalized, trimmed text for the segment. |
-| `attribution` | object \| omitted | Optional provenance `{ "source": String, "confidence": Double? }`. Omitted from JSON when `nil`. |
+| `attribution` | object \| omitted | Optional provenance `{ "source": String, "confidence": Double?, "displayName": String? }`. Omitted from JSON when `nil`; `displayName` (also optional) is likewise omitted when absent. |
 
 Example line:
 
@@ -182,8 +265,19 @@ Example line:
 {"end":4.2,"schemaVersion":1,"source":"you","start":1.0,"text":"Hello everyone"}
 ```
 
+`attribution.source == "vision"` indicates a name resolved via on-device Vision
+OCR of the active-speaker tile (opt-in, Teams only, MVP signal #2 — see
+[Speaker attribution](#speaker-attribution) below). Example line with
+attribution:
+
+```json
+{"attribution":{"confidence":0.82,"displayName":"Jane Doe","source":"vision"},"end":6.4,"schemaVersion":1,"source":"them","start":4.9,"text":"Let's start with the roadmap"}
+```
+
 The `.md` render mirrors each finalized segment as `[hh:mm:ss] source: text`,
-deriving the timestamp from the segment `start`.
+deriving the timestamp from the segment `start`. When the segment carries a
+resolved `attribution.displayName`, the render instead shows
+`[hh:mm:ss] <displayName> (<source>): text`.
 
 ## Privacy
 
