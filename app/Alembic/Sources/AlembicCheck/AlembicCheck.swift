@@ -1062,6 +1062,62 @@ struct AlembicCheck {
             s.expectEqual(lines.count, 1, "the rescued far-end line was written")
         }
 
+        await s.checkAsync("MeetingSession discard: auto-started session stopped before the watchdog with no far-end speech is discarded") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let you = FakeTranscriptionEngine(script: [
+                TranscriptEvent(kind: .finalized, source: .you, start: 0, end: 1, text: "can you hear me?"),
+            ], emitOnStart: true)
+            let them = FakeTranscriptionEngine(script: [], emitOnStart: true)
+            let source = FakeAudioSource(script: [chunk(.you, 0)], finishAfterScript: false)
+            let make = makeWriterFactory(dir)
+
+            let session = await MainActor.run {
+                MeetingSession(
+                    audioSource: source,
+                    engineFactory: { tag, _ in tag == .you ? you : them },
+                    makeWriter: make)
+            }
+            await session.loadTargets()
+            await session.start(target: await session.availableTargets.first!, discardIfSilentAfter: 120)
+            await session.stop()
+
+            guard case .discarded = await session.state else {
+                s.expect(false, "early-stopped silent auto session reached .discarded"); return
+            }
+            s.expect(await session.outputURL == nil, "outputURL cleared after discard")
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            s.expect(leftovers.isEmpty, "transcript files deleted (found: \(leftovers))")
+        }
+
+        await s.checkAsync("MeetingSession discard: a manual session with no far-end speech is still saved at stop") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let you = FakeTranscriptionEngine(script: [
+                TranscriptEvent(kind: .finalized, source: .you, start: 0, end: 1, text: "dictating a note"),
+            ], emitOnStart: true)
+            let them = FakeTranscriptionEngine(script: [], emitOnStart: true)
+            let source = FakeAudioSource(script: [chunk(.you, 0)], finishAfterScript: false)
+            let make = makeWriterFactory(dir)
+
+            let session = await MainActor.run {
+                MeetingSession(
+                    audioSource: source,
+                    engineFactory: { tag, _ in tag == .you ? you : them },
+                    makeWriter: make)
+            }
+            await session.loadTargets()
+            await session.start(target: await session.availableTargets.first!)
+            await session.stop()
+
+            guard case let .saved(url) = await session.state else {
+                s.expect(false, "manual session saved"); return
+            }
+            s.expect(FileManager.default.fileExists(atPath: url.path), "manual transcript kept")
+        }
+
         // --- Phase 3: FakeAttributionProvider end-to-end wiring (§2.1–§2.6) ---
 
         await s.checkAsync("MeetingSession + FakeAttributionProvider: attributes finalized .them end-to-end; .you/volatile untouched") { s in
@@ -3835,10 +3891,10 @@ struct AlembicCheck {
                                    isRunningInput: false, isRunningOutput: true)]
             }
 
-            // Hub-only windows: meetingTitleProvider returns nil → signal none.
+            // Hub-only windows: no meeting window on screen → signal none.
             let noWindow = MeetingDetector(
                 snapshotProvider: { [] },
-                meetingTitleProvider: { _ in nil },
+                meetingWindowProvider: { _ in .none },
                 policy: MeetingDetectionPolicy(startDebounce: 0, broadcastStartDebounce: 30, endDebounce: 0)
             )
             for t in stride(from: 0.0, through: 60.0, by: 3.0) {
@@ -3849,7 +3905,7 @@ struct AlembicCheck {
             // Meeting window exists: confirms only after the broadcast debounce.
             let townHall = MeetingDetector(
                 snapshotProvider: { [] },
-                meetingTitleProvider: { _ in "Digital Town Hall" },
+                meetingWindowProvider: { _ in MeetingWindowSnapshot(frontmost: "Digital Town Hall") },
                 policy: MeetingDetectionPolicy(startDebounce: 0, broadcastStartDebounce: 30, endDebounce: 0)
             )
             s.expect(townHall.tick(snapshot: outputOnlyTeams(), now: 0) == nil, "t=0: confirming")
@@ -3874,7 +3930,7 @@ struct AlembicCheck {
             let box = TitleBox()
             let det = MeetingDetector(
                 snapshotProvider: { [] },
-                meetingTitleProvider: { _ in box.title },
+                meetingWindowProvider: { _ in MeetingWindowSnapshot(frontmost: box.title) },
                 titleChangeStability: 6,
                 policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
             )
@@ -3901,6 +3957,50 @@ struct AlembicCheck {
             // Title disappearing (window minimized) never splits or ends.
             box.title = nil
             s.expect(det.tick(snapshot: teams(), now: 25) == nil, "nil title → no effect")
+        }
+
+        // --- 10. Presence-based split: z-order noise never splits a live meeting ---
+        s.check("MeetingDetector tick: another window in front never splits while the meeting window still exists") { s in
+            final class WindowsBox: @unchecked Sendable {
+                private let lock = NSLock()
+                private var value = MeetingWindowSnapshot(frontmost: "Lodestar Standup")
+                var snapshot: MeetingWindowSnapshot {
+                    get { lock.withLock { value } }
+                    set { lock.withLock { value = newValue } }
+                }
+            }
+            let box = WindowsBox()
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                meetingWindowProvider: { _ in box.snapshot },
+                titleChangeStability: 6,
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(), now: 0)
+            s.expect(det.tick(snapshot: teams(), now: 0)?.flatMap { $0 } != nil, "meeting active")
+
+            // A different, uncatalogued Teams window sits in front for a
+            // minute while the call window stays open behind it.
+            box.snapshot = MeetingWindowSnapshot(frontmost: "Longietti, Samuel (Contractor)", present: ["Lodestar Standup"])
+            for t in stride(from: 1.0, through: 60.0, by: 3.0) {
+                s.expect(det.tick(snapshot: teams(), now: t) == nil, "call window still present → no split (t=\(t))")
+            }
+
+            // Call window minimized / on another Space: off screen but still exists.
+            box.snapshot = MeetingWindowSnapshot(
+                frontmost: "Longietti, Samuel (Contractor)",
+                present: ["Lodestar Standup", "Longietti, Samuel (Contractor)"])
+            for t in stride(from: 61.0, through: 90.0, by: 3.0) {
+                s.expect(det.tick(snapshot: teams(), now: t) == nil, "minimized call window still present → no split (t=\(t))")
+            }
+
+            // Call window closed, next meeting's window frontmost: split after stability.
+            box.snapshot = MeetingWindowSnapshot(frontmost: "Next Meeting")
+            s.expect(det.tick(snapshot: teams(), now: 100) == nil, "new title pending")
+            guard let split = det.tick(snapshot: teams(), now: 107), let d = split else {
+                s.expect(false, "meeting window gone + stable new title → split"); return
+            }
+            s.expectEqual(d.app.displayName, "Microsoft Teams", "split re-detects the same app")
         }
     }
 
@@ -4232,6 +4332,68 @@ struct AlembicCheck {
         s.check("Teams catalog excludes Meeting compact view overlay") { s in
             let prefixes = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.nonMeetingTitlePrefixes ?? []
             s.expect(prefixes.contains("Meeting compact view"), "Meeting compact view in Teams exclusions")
+        }
+
+        // Window titles observed on 2026-10-16 that split one Teams call into
+        // many transcript files.
+        s.check("strict title: observed Teams chrome (Window, Sharing Indicator, webview URL) is never a meeting window") { s in
+            guard let app = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app else {
+                s.expect(false, "Teams catalog entry"); return
+            }
+            for chrome in ["Window", "Sharing Indicator", "teams.microsoft.com/v2/"] {
+                let result = MeetingContext.bestTitle(
+                    from: [chrome], exclusions: app.nonMeetingTitlePrefixes,
+                    preferFrontmost: true, exclusionFallback: false)
+                s.expect(result == nil, "\"\(chrome)\" alone ⇒ no meeting window")
+            }
+            let raw = MeetingContext.bestTitle(
+                from: ["Sharing Indicator", "Window", "Longietti, Samuel (Contractor) | Microsoft Teams"],
+                exclusions: app.nonMeetingTitlePrefixes, preferFrontmost: true, exclusionFallback: false)
+            s.expectEqual(raw, "Longietti, Samuel (Contractor) | Microsoft Teams",
+                          "chrome in front is skipped; the call window behind it is the meeting")
+        }
+
+        s.check("pre-join lobby and joined meeting window normalize to the same meeting name") { s in
+            guard let app = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app else {
+                s.expect(false, "Teams catalog entry"); return
+            }
+            let names = MeetingContext.normalizedMeetingTitles(
+                from: [
+                    "Meeting join | Lodestar Daily Standup (Europe TZ) | Microsoft Teams",
+                    "Lodestar Daily Standup (Europe TZ) | Microsoft Teams",
+                ],
+                exclusions: app.nonMeetingTitlePrefixes,
+                leadingStrips: app.titleLeadingStrips,
+                trailingStrips: app.titleTrailingStrips)
+            s.expectEqual(names, ["Lodestar Daily Standup (Europe TZ)"], "lobby and joined window are one meeting")
+        }
+
+        s.check("normalizedMeetingTitles: drops excluded and URL chrome, keeps order, de-duplicates") { s in
+            let names = MeetingContext.normalizedMeetingTitles(
+                from: [
+                    "Chat | Alice | Microsoft Teams", "Window", "B | Microsoft Teams",
+                    "teams.microsoft.com/v2/", "A | Microsoft Teams", "B | Microsoft Teams",
+                ],
+                exclusions: ["Chat", "Window"],
+                leadingStrips: [],
+                trailingStrips: [" | Microsoft Teams"])
+            s.expectEqual(names, ["B", "A"], "only real meeting names, first-seen order, no duplicates")
+        }
+
+        s.check("isURLLikeTitle: URL/host-path chrome matches; meeting subjects and dotted words do not") { s in
+            for url in ["teams.microsoft.com/v2/", "teams.microsoft.com/v2/ | Microsoft Teams", "zoom.us/j/123", "about://blank"] {
+                s.expect(MeetingContext.isURLLikeTitle(url), "\"\(url)\" is URL-like")
+            }
+            for name in ["Lodestar Daily Standup (Europe TZ)", "Q3 review / planning", "v2.0", "Ops.Sync", "+1 913-712-6167", "Window"] {
+                s.expect(!MeetingContext.isURLLikeTitle(name), "\"\(name)\" is not URL-like")
+            }
+        }
+
+        s.check("applyLeadingStrips: strips only a matching prefix and never empties a title") { s in
+            let strips = ["Meeting join | "]
+            s.expectEqual(MeetingContext.applyLeadingStrips(to: "Meeting join | Standup", strips: strips), "Standup", "prefix stripped")
+            s.expectEqual(MeetingContext.applyLeadingStrips(to: "Standup", strips: strips), "Standup", "no prefix ⇒ unchanged")
+            s.expectEqual(MeetingContext.applyLeadingStrips(to: "Meeting join | ", strips: strips), "Meeting join | ", "would-be-empty ⇒ unchanged")
         }
     }
 

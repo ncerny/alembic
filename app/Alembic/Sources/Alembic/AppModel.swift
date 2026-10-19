@@ -397,8 +397,15 @@ final class AppModel {
         let appHints = appMatch?.app.titleHints ?? []
         let exclusions = appMatch?.app.nonMeetingTitlePrefixes ?? []
         let trailingStrips = appMatch?.app.titleTrailingStrips ?? []
+        let leadingStrips = appMatch?.app.titleLeadingStrips ?? []
         let windowTitle = await Task.detached(priority: .userInitiated) {
-            WindowTitleProbe.fullTitle(forBundleID: target.id, appHints: appHints, exclusions: exclusions, trailingStrips: trailingStrips)
+            WindowTitleProbe.fullTitle(
+                forBundleID: target.id,
+                appHints: appHints,
+                exclusions: exclusions,
+                trailingStrips: trailingStrips,
+                leadingStrips: leadingStrips
+            )
         }.value
         let ctx = MeetingContext(
             windowTitle: windowTitle,
@@ -563,8 +570,8 @@ final class AppModel {
                 guard !confirmApps.isEmpty else { return [] }
                 return WindowTitleProbe.presentHints(for: confirmApps, processStates: states)
             },
-            meetingTitleProvider: { match in
-                WindowTitleProbe.meetingWindowTitle(for: match)
+            meetingWindowProvider: { match in
+                WindowTitleProbe.meetingWindows(for: match)
             }
         )
         detector = det

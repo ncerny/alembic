@@ -73,13 +73,23 @@ public struct WindowTitleProbe: Sendable {
     ///    preferring the frontmost qualifying window (candidates are collected in
     ///    front-to-back z-order) so a verbose hub page left open behind the call
     ///    never shadows the real meeting window's title.
-    /// 5. Strips any matching `trailingStrips` suffix (e.g. `" | Microsoft Teams"`).
+    /// 5. Strips any matching `leadingStrips` prefix (e.g. `"Meeting join | "`)
+    ///    before ranking and any matching `trailingStrips` suffix (e.g.
+    ///    `" | Microsoft Teams"`) after it.
     ///
     /// Uses the Screen Recording permission Alembic already holds; no new
     /// permission is required.
-    public static func fullTitle(forBundleID bundleID: String, appHints: [String] = [], exclusions: [String] = [], trailingStrips: [String] = []) -> String? {
+    public static func fullTitle(
+        forBundleID bundleID: String,
+        appHints: [String] = [],
+        exclusions: [String] = [],
+        trailingStrips: [String] = [],
+        leadingStrips: [String] = []
+    ) -> String? {
+        let candidates = titleCandidates(forBundleID: bundleID, onScreenOnly: true)
+            .map { MeetingContext.applyLeadingStrips(to: $0, strips: leadingStrips) }
         guard let raw = MeetingContext.bestTitle(
-            from: titleCandidates(forBundleID: bundleID),
+            from: candidates,
             appHints: appHints,
             exclusions: exclusions,
             preferFrontmost: true
@@ -95,18 +105,45 @@ public struct WindowTitleProbe: Sendable {
     /// now, and what is it called?" — used to gate broadcast-tier detections
     /// and to split back-to-back meetings on a title change.
     public static func meetingWindowTitle(for match: MeetingAppMatch) -> String? {
-        guard let raw = MeetingContext.bestTitle(
-            from: titleCandidates(forBundleID: match.canonicalBundlePrefix),
-            appHints: match.app.titleHints,
+        strictFrontmostTitle(
+            from: titleCandidates(forBundleID: match.canonicalBundlePrefix, onScreenOnly: true),
+            app: match.app
+        )
+    }
+
+    /// The detector's view of an app's meeting windows: the strict frontmost
+    /// on-screen meeting title (as `meetingWindowTitle`) plus every normalized
+    /// meeting title among **all** of the family's windows — including
+    /// minimized and other-Space ones — so a split can require that the
+    /// latched meeting window is actually gone, not merely behind another
+    /// window.
+    public static func meetingWindows(for match: MeetingAppMatch) -> MeetingWindowSnapshot {
+        let frontmost = meetingWindowTitle(for: match)
+        let all = titleCandidates(forBundleID: match.canonicalBundlePrefix, onScreenOnly: false)
+        let present = MeetingContext.normalizedMeetingTitles(
+            from: all,
             exclusions: match.app.nonMeetingTitlePrefixes,
+            leadingStrips: match.app.titleLeadingStrips,
+            trailingStrips: match.app.titleTrailingStrips
+        )
+        return MeetingWindowSnapshot(frontmost: frontmost, present: Set(present))
+    }
+
+    private static func strictFrontmostTitle(from candidates: [String], app: MeetingApp) -> String? {
+        guard let raw = MeetingContext.bestTitle(
+            from: candidates.map { MeetingContext.applyLeadingStrips(to: $0, strips: app.titleLeadingStrips) },
+            appHints: app.titleHints,
+            exclusions: app.nonMeetingTitlePrefixes,
             preferFrontmost: true,
             exclusionFallback: false
         ) else { return nil }
-        return MeetingContext.applyTrailingStrips(to: raw, strips: match.app.titleTrailingStrips)
+        return MeetingContext.applyTrailingStrips(to: raw, strips: app.titleTrailingStrips)
     }
 
-    /// Collects on-screen window titles for a bundle-ID family, front-to-back.
-    private static func titleCandidates(forBundleID bundleID: String) -> [String] {
+    /// Collects window titles for a bundle-ID family, front-to-back for
+    /// on-screen windows. `onScreenOnly: false` also includes minimized and
+    /// other-Space windows (their relative order is not meaningful).
+    private static func titleCandidates(forBundleID bundleID: String, onScreenOnly: Bool) -> [String] {
         var candidatePIDs: Set<Int32> = []
 
         // If the id is a raw PID reference (e.g. "pid:1234"), use it directly.
@@ -134,9 +171,10 @@ public struct WindowTitleProbe: Sendable {
 
         guard !candidatePIDs.isEmpty else { return [] }
 
-        guard let windowList = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-        ) as? [[String: Any]] else { return [] }
+        let options: CGWindowListOption = onScreenOnly
+            ? [.optionOnScreenOnly, .excludeDesktopElements]
+            : [.optionAll, .excludeDesktopElements]
+        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return [] }
 
         // New Teams (and similar Electron apps) spawn tiny (~66x20) overlay
         // helper windows titled "Window" alongside the real meeting/hub windows.

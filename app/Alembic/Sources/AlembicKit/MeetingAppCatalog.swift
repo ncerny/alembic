@@ -69,6 +69,14 @@ public struct MeetingApp: Sendable, Equatable {
     /// kept unchanged.
     public let titleTrailingStrips: [String]
 
+    /// Leading chrome to strip from a window title **before** exclusion and
+    /// ranking (e.g. Teams' pre-join lobby `"Meeting join | "`), so the lobby
+    /// and the joined meeting window resolve to the same meeting name — the
+    /// lobby retitling on join must never look like a different meeting.
+    /// Only the first matching prefix is stripped; a strip that would leave an
+    /// empty title is skipped.
+    public let titleLeadingStrips: [String]
+
     public init(
         displayName: String,
         bundlePrefixes: [String],
@@ -78,7 +86,8 @@ public struct MeetingApp: Sendable, Equatable {
         requiresTitleConfirmation: Bool = false,
         titleHints: [String] = [],
         nonMeetingTitlePrefixes: [String] = [],
-        titleTrailingStrips: [String] = []
+        titleTrailingStrips: [String] = [],
+        titleLeadingStrips: [String] = []
     ) {
         self.displayName = displayName
         self.bundlePrefixes = bundlePrefixes
@@ -89,6 +98,7 @@ public struct MeetingApp: Sendable, Equatable {
         self.titleHints = titleHints
         self.nonMeetingTitlePrefixes = nonMeetingTitlePrefixes
         self.titleTrailingStrips = titleTrailingStrips
+        self.titleLeadingStrips = titleLeadingStrips
     }
 }
 
@@ -170,8 +180,16 @@ public enum MeetingAppCatalog {
                 // ("Meeting compact view | <real name> | Microsoft Teams"), so it
                 // must be dropped in favour of the full call/meeting window.
                 "Meeting compact view",
+                // In-call chrome surfaces that are large enough to pass the
+                // overlay size floor and were observed being latched as the
+                // "meeting" (splitting one call into many files): an untitled
+                // Electron surface and the screen-share frame/toolbar.
+                "Window",
+                "Sharing Indicator",
             ],
-            titleTrailingStrips: [" | Microsoft Teams"]
+            titleTrailingStrips: [" | Microsoft Teams"],
+            // Pre-join lobby: "Meeting join | <name> | Microsoft Teams".
+            titleLeadingStrips: ["Meeting join | "]
         ),
         MeetingApp(
             displayName: "Zoom",

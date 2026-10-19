@@ -33,6 +33,30 @@ public struct Detection: Sendable, Equatable {
     }
 }
 
+// MARK: - MeetingWindowSnapshot
+
+/// What the window server reports about one app's meeting windows at a single
+/// instant, in normalized meeting-name form (see
+/// `MeetingContext.normalizedMeetingTitles`).
+public struct MeetingWindowSnapshot: Sendable, Equatable {
+    /// The frontmost on-screen meeting-window title, or `nil` when only
+    /// hub/chrome (excluded) windows are on screen.
+    public let frontmost: String?
+    /// Every meeting-window title that currently exists for the app —
+    /// on-screen, minimized, or on another Space. Always contains `frontmost`.
+    public let present: Set<String>
+
+    public init(frontmost: String?, present: Set<String> = []) {
+        self.frontmost = frontmost
+        var all = present
+        if let frontmost { all.insert(frontmost) }
+        self.present = all
+    }
+
+    /// No meeting window exists.
+    public static let none = MeetingWindowSnapshot(frontmost: nil)
+}
+
 // MARK: - MeetingDetector
 
 /// Fuses `AudioProcessMonitor` snapshots, `MeetingDetectionPolicy` debouncing,
@@ -46,7 +70,7 @@ public struct Detection: Sendable, Equatable {
 /// **Tiers** (see `MeetingAppCatalog.detectCandidates`):
 /// - `.interactive` evidence confirms after the short start debounce.
 /// - `.broadcastCandidate` evidence (output-only town halls) additionally
-///   requires a strict meeting-window title from `meetingTitleProvider` and
+///   requires a strict meeting-window title from `meetingWindowProvider` and
 ///   confirms only after the long broadcast debounce — so a notification
 ///   chime's lingering output stream can never start a session.
 ///
@@ -59,12 +83,16 @@ public struct Detection: Sendable, Equatable {
 /// session within `endDebounce` instead of riding the family's ~11.5 s
 /// post-call output linger. Broadcast sessions persist while it runs output.
 ///
-/// **Back-to-back split:** while active, when the app's strict meeting-window
-/// title changes to a different non-nil value and stays changed for
+/// **Back-to-back split:** while active, when the latched meeting window no
+/// longer exists in *any* of the app's windows (on-screen, minimized, or on
+/// another Space) and a different meeting title has been frontmost for
 /// `titleChangeStability` seconds, the detector emits `nil` followed
 /// immediately by a fresh `Detection` — so consecutive meetings with no audio
-/// gap still produce separate sessions. A title that *disappears* (window
-/// minimized) never triggers a split.
+/// gap still produce separate sessions. Split decisions key on the meeting
+/// window's *presence*, never on z-order: raising, focusing, or minimizing
+/// windows (another Teams window coming to the front while the call window is
+/// still open) can never split a meeting. A title that *disappears* without a
+/// replacement never triggers a split either.
 ///
 /// **Thread safety:** `tick()` guards mutable state with `NSLock`.
 /// `@unchecked Sendable` because the lock covers all mutation.
@@ -73,7 +101,7 @@ public final class MeetingDetector: @unchecked Sendable {
     private let snapshotProvider: @Sendable () -> [AudioProcessState]
     private let nowProvider: @Sendable () -> TimeInterval
     private let titleProbe: (@Sendable ([AudioProcessState]) -> Set<String>)?
-    private let meetingTitleProvider: (@Sendable (MeetingAppMatch) -> String?)?
+    private let meetingWindowProvider: (@Sendable (MeetingAppMatch) -> MeetingWindowSnapshot)?
     private let titleChangeStability: TimeInterval
     private let safetyPollInterval: TimeInterval
 
@@ -96,9 +124,10 @@ public final class MeetingDetector: @unchecked Sendable {
     ///   - nowProvider: Monotonic clock for `MeetingDetectionPolicy`. Defaults to `systemUptime`.
     ///   - titleProbe: Optional title-hint provider for `requiresTitleConfirmation` apps.
     ///     Receives the current process states; returns confirmed title hint substrings.
-    ///   - meetingTitleProvider: Optional strict meeting-window title lookup for an app
-    ///     family (`nil` when only hub/non-meeting windows exist). Enables the broadcast
-    ///     tier's title gate and back-to-back title-change splitting.
+    ///   - meetingWindowProvider: Optional meeting-window lookup for an app family:
+    ///     the strict frontmost meeting title (`nil` when only hub/non-meeting windows
+    ///     are on screen) plus every meeting title that still exists. Enables the
+    ///     broadcast tier's title gate and back-to-back presence-based splitting.
     ///   - titleChangeStability: Seconds a changed title must persist before splitting.
     ///   - policy: Initial policy state. Override for testing (e.g. shorter debounces).
     ///   - safetyPollInterval: Interval in seconds for the background safety poll in `run(wakeUps:)`.
@@ -106,7 +135,7 @@ public final class MeetingDetector: @unchecked Sendable {
         snapshotProvider: @escaping @Sendable () -> [AudioProcessState],
         nowProvider: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
         titleProbe: (@Sendable ([AudioProcessState]) -> Set<String>)? = nil,
-        meetingTitleProvider: (@Sendable (MeetingAppMatch) -> String?)? = nil,
+        meetingWindowProvider: (@Sendable (MeetingAppMatch) -> MeetingWindowSnapshot)? = nil,
         titleChangeStability: TimeInterval = 6.0,
         policy: MeetingDetectionPolicy = MeetingDetectionPolicy(),
         safetyPollInterval: TimeInterval = 3.0
@@ -114,7 +143,7 @@ public final class MeetingDetector: @unchecked Sendable {
         self.snapshotProvider = snapshotProvider
         self.nowProvider = nowProvider
         self.titleProbe = titleProbe
-        self.meetingTitleProvider = meetingTitleProvider
+        self.meetingWindowProvider = meetingWindowProvider
         self.titleChangeStability = titleChangeStability
         self.policy = policy
         self.safetyPollInterval = safetyPollInterval
@@ -169,8 +198,8 @@ public final class MeetingDetector: @unchecked Sendable {
                 case .broadcastCandidate:
                     // Output-only evidence needs a real meeting window; a
                     // chime with only hub windows on screen contributes nothing.
-                    if let probe = meetingTitleProvider, let match = resolved?.match {
-                        signal = probe(match) != nil ? .broadcast : .none
+                    if let probe = meetingWindowProvider, let match = resolved?.match {
+                        signal = probe(match).frontmost != nil ? .broadcast : .none
                     } else {
                         signal = .broadcast
                     }
@@ -186,7 +215,7 @@ public final class MeetingDetector: @unchecked Sendable {
                 if activeCandidate == nil, let c = candidate {
                     // Newly confirmed: latch the app and emit.
                     activeCandidate = c
-                    currentTitle = meetingTitleProvider?(c.match)
+                    currentTitle = meetingWindowProvider?(c.match).frontmost
                     clearPendingTitle()
                     let d = Detection(
                         app: c.match.app,
@@ -258,11 +287,11 @@ public final class MeetingDetector: @unchecked Sendable {
     ///
     /// Returns the emitted value when a split occurred, else `nil`.
     private func evaluateTitleSplit(now: TimeInterval, states: [AudioProcessState]) -> Detection?? {
-        guard let c = activeCandidate, let probe = meetingTitleProvider else { return nil }
-        let title = probe(c.match)
+        guard let c = activeCandidate, let probe = meetingWindowProvider else { return nil }
+        let windows = probe(c.match)
 
-        guard let title else {
-            // Window gone/minimized — not a meeting change.
+        guard let title = windows.frontmost else {
+            // No meeting window on screen — not a meeting change.
             clearPendingTitle()
             return nil
         }
@@ -272,7 +301,9 @@ public final class MeetingDetector: @unchecked Sendable {
             clearPendingTitle()
             return nil
         }
-        guard title != current else {
+        // Presence, not z-order: while the latched meeting window still exists
+        // anywhere, a different window being frontmost is not a new meeting.
+        guard title != current, !windows.present.contains(current) else {
             clearPendingTitle()
             return nil
         }

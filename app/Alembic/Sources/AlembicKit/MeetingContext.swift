@@ -100,12 +100,87 @@ public struct MeetingContext: Sendable {
         return title
     }
 
+    /// Strips known leading chrome from a window title — e.g. Teams' pre-join
+    /// lobby `"Meeting join | Standup | Microsoft Teams"` → `"Standup | Microsoft
+    /// Teams"` — so the lobby and the joined meeting window name the same
+    /// meeting. Mirrors `applyTrailingStrips`: only the first matching prefix
+    /// is removed, and a strip that would leave an empty title is skipped.
+    public static func applyLeadingStrips(to title: String, strips: [String]) -> String {
+        for strip in strips {
+            if title.hasPrefix(strip) {
+                let stripped = title.dropFirst(strip.count)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return stripped.isEmpty ? title : stripped
+            }
+        }
+        return title
+    }
+
+    /// `true` when the title's leading ` | ` segment is a bare URL or
+    /// host/path (e.g. `"teams.microsoft.com/v2/"`, a transient webview title
+    /// shown while a call is being set up). Such a title is never a meeting
+    /// name, so `bestTitle` treats it as excluded for every app.
+    ///
+    /// Requires no whitespace and either a URL scheme separator or a dotted
+    /// hostname followed by a `/` path, so ordinary meeting subjects
+    /// (which contain spaces) and bare dotted words never match.
+    public static func isURLLikeTitle(_ title: String) -> Bool {
+        let leading = leadingSegment(of: title)
+        guard !leading.isEmpty, !leading.contains(where: \.isWhitespace) else { return false }
+        if leading.contains("://") { return true }
+        guard let slash = leading.firstIndex(of: "/") else { return false }
+        let labels = leading[..<slash].split(separator: ".", omittingEmptySubsequences: false)
+        return labels.count >= 2 && labels.allSatisfy { label in
+            !label.isEmpty && label.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" }
+        }
+    }
+
+    /// Every candidate that qualifies as a meeting window under the strict
+    /// (detection) rules — non-empty, leading segment not in `exclusions`, not
+    /// URL-like — normalized to the meeting-name form `meetingWindowTitle`
+    /// produces (leading chrome stripped, then the trailing app suffix).
+    /// Order-preserving and de-duplicated.
+    ///
+    /// The detector uses this over *all* of an app's windows (including
+    /// minimized and other-Space ones) to ask "does the latched meeting window
+    /// still exist?", which is what gates a back-to-back split.
+    public static func normalizedMeetingTitles(
+        from candidates: [String],
+        exclusions: [String],
+        leadingStrips: [String],
+        trailingStrips: [String]
+    ) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for raw in candidates {
+            let candidate = applyLeadingStrips(to: raw, strips: leadingStrips)
+            guard !candidate.isEmpty, !isExcluded(candidate, exclusions: exclusions) else { continue }
+            let name = applyTrailingStrips(to: candidate, strips: trailingStrips)
+            if seen.insert(name).inserted { result.append(name) }
+        }
+        return result
+    }
+
+    /// The trimmed first ` | `-delimited segment of a window title.
+    private static func leadingSegment(of title: String) -> String {
+        title.components(separatedBy: " | ")
+            .first?
+            .trimmingCharacters(in: .whitespaces) ?? title
+    }
+
+    /// Whether a candidate is a non-meeting window: its leading segment is a
+    /// catalogued exclusion, or it is URL-like chrome.
+    private static func isExcluded(_ candidate: String, exclusions: [String]) -> Bool {
+        exclusions.contains(leadingSegment(of: candidate)) || isURLLikeTitle(candidate)
+    }
+
     /// Picks the best window title from a set of candidates.
     ///
     /// Selection rules (in priority order):
     /// 1. Drop any candidate whose leading ` | `-delimited segment (trimmed)
     ///    exactly matches an entry in `exclusions` (e.g. Teams hub sections
-    ///    like "Chat" or "Calendar"). When `exclusionFallback` is `true`
+    ///    like "Chat" or "Calendar"), or that is URL-like chrome
+    ///    (`isURLLikeTitle`). When `exclusionFallback` is `true`
     ///    (default) and every non-empty candidate is excluded, the exclusion
     ///    step is skipped and the full non-empty set is used so a title is
     ///    never lost. When `false`, all-excluded returns `nil` — the strict
@@ -134,26 +209,15 @@ public struct MeetingContext: Sendable {
         let nonempty = candidates.filter { !$0.isEmpty }
         guard !nonempty.isEmpty else { return nil }
 
-        // Apply leading-segment exclusions when provided.
+        let filtered = nonempty.filter { !isExcluded($0, exclusions: exclusions) }
         let pool: [String]
-        if !exclusions.isEmpty {
-            let filtered = nonempty.filter { candidate in
-                let leading = candidate
-                    .components(separatedBy: " | ")
-                    .first?
-                    .trimmingCharacters(in: .whitespaces) ?? candidate
-                return !exclusions.contains(leading)
-            }
-            if filtered.isEmpty {
-                // Naming mode falls back so a title is never lost; strict
-                // (detection) mode reports that no meeting window exists.
-                guard exclusionFallback else { return nil }
-                pool = nonempty
-            } else {
-                pool = filtered
-            }
-        } else {
+        if filtered.isEmpty {
+            // Naming mode falls back so a title is never lost; strict
+            // (detection) mode reports that no meeting window exists.
+            guard exclusionFallback else { return nil }
             pool = nonempty
+        } else {
+            pool = filtered
         }
 
         if !appHints.isEmpty {
