@@ -5,6 +5,7 @@
       "release-type": "simple",
       "package-name": "alembic",
       "include-component-in-tag": false,
+      "initial-version": "0.1.0",
       "bump-minor-pre-major": true,
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
