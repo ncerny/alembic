@@ -29,7 +29,21 @@ transcript to disk as the meeting happens.
 | **macOS 26** or later | `SpeechAnalyzer` / `SpeechTranscriber` and Core Audio process taps |
 | **Xcode Command Line Tools** | `xcode-select --install` — Xcode.app is not required |
 
-## Quick start
+## Install
+
+Download `Alembic-X.Y.Z-macos-arm64.zip` from the
+[latest release](https://github.com/ncerny/alembic/releases/latest) (Apple silicon, macOS 26+):
+
+```bash
+shasum -a 256 -c Alembic-X.Y.Z-macos-arm64.zip.sha256   # verify the download
+ditto -x -k Alembic-X.Y.Z-macos-arm64.zip /Applications # unzip into /Applications
+```
+
+Releases are signed with the project's self-signed certificate but not notarized, so the
+first launch needs **right-click › Open** (or `xattr -dr com.apple.quarantine /Applications/Alembic.app`).
+Updates keep the same signing identity, so granted permissions carry over.
+
+## Quick start (build from source)
 
 ```bash
 cd app/Alembic

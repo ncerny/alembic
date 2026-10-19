@@ -1,0 +1,133 @@
+name: Release
+
+# release-please keeps a release PR up to date from Conventional Commits on
+# main. Merging that PR tags vX.Y.Z and creates the GitHub Release; the build
+# job then attaches the signed app. Both live in this one workflow because
+# releases created with GITHUB_TOKEN do not trigger other workflows.
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Pinned for reproducible builds; bump deliberately when the runner image changes.
+  XCODE_APP: /Applications/Xcode_26.6.app
+
+jobs:
+  release-please:
+    name: Release PR / tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build:
+    name: Build and attach app
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name }}
+      VERSION: ${{ needs.release-please.outputs.version }}
+    defaults:
+      run:
+        working-directory: app/Alembic
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select --switch "$XCODE_APP"
+          swift --version
+
+      - name: Run AlembicCheck
+        run: swift run AlembicCheck
+
+      # Same "Alembic Self-Signed" identity as local build.sh builds, so macOS
+      # permission grants carry across updates. Imported into a throwaway
+      # keychain that is deleted at the end of the job.
+      - name: Import signing identity
+        env:
+          P12_BASE64: ${{ secrets.ALEMBIC_SIGNING_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.ALEMBIC_SIGNING_P12_PASSWORD }}
+        run: |
+          if [[ -z "$P12_BASE64" || -z "$P12_PASSWORD" ]]; then
+            echo "::error::Missing ALEMBIC_SIGNING_P12_BASE64 / ALEMBIC_SIGNING_P12_PASSWORD secrets."
+            exit 1
+          fi
+          keychain="${RUNNER_TEMP}/alembic-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "::add-mask::${keychain_password}"
+          p12="${RUNNER_TEMP}/identity.p12"
+          trap 'rm -f "$p12"' EXIT
+          printf '%s' "$P12_BASE64" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          existing="$(security list-keychains -d user | xargs)"
+          # shellcheck disable=SC2086 # intentional word splitting of the keychain list
+          security list-keychains -d user -s "$keychain" $existing
+
+      - name: Build signed app
+        env:
+          ALEMBIC_CODESIGN_IDENTITY: Alembic Self-Signed
+          ALEMBIC_VERSION: ${{ needs.release-please.outputs.version }}
+          ALEMBIC_BUILD_NUMBER: ${{ github.run_number }}
+        run: bash build.sh
+
+      - name: Verify bundle
+        run: |
+          details="$(codesign --display --verbose=2 build/Alembic.app 2>&1)"
+          echo "$details"
+          if ! grep -q '^Authority=Alembic Self-Signed$' <<< "$details"; then
+            echo "::error::Bundle is not signed with the Alembic Self-Signed identity."
+            exit 1
+          fi
+          codesign --display --requirements - build/Alembic.app
+          stamped="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Alembic.app/Contents/Info.plist)"
+          if [[ "$stamped" != "$VERSION" ]]; then
+            echo "::error::Bundle version ${stamped} does not match release ${VERSION}."
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          zip="Alembic-${VERSION}-macos-arm64.zip"
+          ditto -c -k --sequesterRsrc --keepParent build/Alembic.app "${RUNNER_TEMP}/${zip}"
+          (cd "$RUNNER_TEMP" && shasum -a 256 "$zip" > "${zip}.sha256" && cat "${zip}.sha256")
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          zip="${RUNNER_TEMP}/Alembic-${VERSION}-macos-arm64.zip"
+          gh release upload "$TAG" "$zip" "${zip}.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Remove signing keychain
+        if: always()
+        run: security delete-keychain "${RUNNER_TEMP}/alembic-signing.keychain-db" 2> /dev/null || true

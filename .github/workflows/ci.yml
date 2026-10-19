@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned for reproducible builds; bump deliberately when the runner image changes.
+  XCODE_APP: /Applications/Xcode_26.6.app
+
+jobs:
+  check:
+    name: Build and check
+    runs-on: macos-26
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: app/Alembic
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select --switch "$XCODE_APP"
+          swift --version
+
+      # AlembicCheck is the authoritative test runner (swift test does not
+      # execute the suite under Command Line Tools).
+      - name: Run AlembicCheck
+        run: swift run AlembicCheck
+
+      - name: Privacy audit (no networking code)
+        run: |
+          if grep -rniE 'URLSession|URLRequest|NWConnection|Network\.|Socket|https?://|WebSocket' Sources/; then
+            echo "::error::Networking code found under Sources/ — Alembic must stay fully on-device."
+            exit 1
+          fi
+
+      # No signing identity on PR runners, so this signs ad-hoc; it proves the
+      # bundle assembles and the signature verifies.
+      - name: Assemble app bundle
+        run: bash build.sh
