@@ -10,7 +10,7 @@ transcript to disk as the meeting happens.
 
 ```
 ┌──────────────┐    ┌────────────────────────────────┐    ┌─────────────────────┐
-│  Teams Call  │───▶│  ScreenCaptureKit ("them")      │    │                     │
+│  Teams Call  │───▶│  Core Audio process tap ("them")│    │                     │
 │  (any app)   │    │  + AVAudioEngine mic ("you")     │───▶│  macOS 26           │
 └──────────────┘    └────────────────────────────────┘    │  SpeechAnalyzer     │
                                                            │  (on-device)        │
@@ -26,7 +26,7 @@ transcript to disk as the meeting happens.
 
 | Requirement | Notes |
 |---|---|
-| **macOS 26** or later | `SpeechAnalyzer` / `SpeechTranscriber` and ScreenCaptureKit per-app audio |
+| **macOS 26** or later | `SpeechAnalyzer` / `SpeechTranscriber` and Core Audio process taps |
 | **Xcode Command Line Tools** | `xcode-select --install` — Xcode.app is not required |
 
 ## Quick start
@@ -42,7 +42,8 @@ test, settings, and transcript format documentation.
 
 ## Features
 
-- 🎙 **No bot, no virtual audio device** — ScreenCaptureKit captures per-app audio directly; AVAudioEngine captures the microphone
+- 🎙 **No bot, no virtual audio device** — a Core Audio process tap captures the meeting app's audio directly; AVAudioEngine captures the microphone
+- 🔔 **Notifications keep working** — no screen-capture session runs during a meeting, so macOS never treats the screen as "shared" and silences banners
 - 🔒 **Fully on-device** — Apple's `SpeechAnalyzer` runs locally; nothing is transmitted during a meeting
 - 🏷 **Vocabulary hints** — bias recognition toward your domain's names via Settings (inline terms, a plain-text file, or a folder of Markdown notes)
 - 📄 **Crash-safe output** — each segment is flushed to disk immediately; a crash mid-meeting leaves a fully parseable transcript

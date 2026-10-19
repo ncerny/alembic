@@ -4,8 +4,8 @@ import Foundation
 /// observable `PermissionsModel` coordinator and exercised by `AlembicCheck`.
 ///
 /// ## Why this lives in the contract layer (Foundation-only)
-/// The three permissions Alembic needs — Microphone, Speech Recognition, and
-/// Screen Recording — **fail independently**, gate recording, and each maps to a
+/// The four permissions Alembic needs — Microphone, Speech Recognition, Screen
+/// Recording, and System Audio Recording — **fail independently**, gate recording, and each maps to a
 /// specific, actionable user message. The *decisions* about those states (how a
 /// raw TCC status becomes a UI state, when Screen Recording needs an app
 /// restart, whether all three are granted, and which message/Settings deep-link
@@ -18,6 +18,9 @@ public enum PermissionKind: String, Sendable, Equatable, CaseIterable {
     case microphone
     case speechRecognition
     case screenRecording
+    /// System Audio Recording (`kTCCServiceAudioCapture`): the meeting-audio
+    /// process tap. Listed under Screen & System Audio Recording in Settings.
+    case systemAudioRecording
 
     /// Short, user-facing label for the permission row.
     public var displayName: String {
@@ -25,6 +28,7 @@ public enum PermissionKind: String, Sendable, Equatable, CaseIterable {
         case .microphone: return "Microphone"
         case .speechRecognition: return "Speech Recognition"
         case .screenRecording: return "Screen Recording"
+        case .systemAudioRecording: return "System Audio Recording"
         }
     }
 
@@ -37,13 +41,14 @@ public enum PermissionKind: String, Sendable, Equatable, CaseIterable {
             return "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
         case .speechRecognition:
             return "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition"
-        case .screenRecording:
+        case .screenRecording, .systemAudioRecording:
+            // Both live in the "Screen & System Audio Recording" pane.
             return "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
         }
     }
 }
 
-/// Per-permission UI state. The three permissions each carry one of these,
+/// Per-permission UI state. The four permissions each carry one of these,
 /// updated independently as the user grants them.
 public enum PermissionState: String, Sendable, Equatable {
     /// Not yet determined / never requested this launch.
@@ -106,21 +111,24 @@ public enum PermissionLogic {
     }
 }
 
-/// An immutable snapshot of all three permission states, with the "ready to
+/// An immutable snapshot of all four permission states, with the "ready to
 /// record" aggregation and the list of what's still missing.
 public struct PermissionSnapshot: Sendable, Equatable {
     public var microphone: PermissionState
     public var speechRecognition: PermissionState
     public var screenRecording: PermissionState
+    public var systemAudioRecording: PermissionState
 
     public init(
         microphone: PermissionState = .unknown,
         speechRecognition: PermissionState = .unknown,
-        screenRecording: PermissionState = .unknown
+        screenRecording: PermissionState = .unknown,
+        systemAudioRecording: PermissionState = .unknown
     ) {
         self.microphone = microphone
         self.speechRecognition = speechRecognition
         self.screenRecording = screenRecording
+        self.systemAudioRecording = systemAudioRecording
     }
 
     public func state(of kind: PermissionKind) -> PermissionState {
@@ -128,14 +136,15 @@ public struct PermissionSnapshot: Sendable, Equatable {
         case .microphone: return microphone
         case .speechRecognition: return speechRecognition
         case .screenRecording: return screenRecording
+        case .systemAudioRecording: return systemAudioRecording
         }
     }
 
-    /// Recording may only start when **all three** permissions are granted and
+    /// Recording may only start when **every** permission is granted and
     /// effective. Anything else (denied, unknown, requesting, requiresRestart)
     /// must block the start with an actionable message — never a silent no-op.
     public var isReadyToRecord: Bool {
-        microphone.isGranted && speechRecognition.isGranted && screenRecording.isGranted
+        PermissionKind.allCases.allSatisfy { state(of: $0).isGranted }
     }
 
     /// Permissions that are not yet granted, in a stable order, so the UI can
@@ -145,7 +154,8 @@ public struct PermissionSnapshot: Sendable, Equatable {
     }
 
     /// The single most relevant blocker for a refused `start()`, chosen in a
-    /// stable priority order (microphone, speech, screen recording). Returns
+    /// stable priority order (microphone, speech, screen recording, system
+    /// audio recording). Returns
     /// `nil` when ``isReadyToRecord`` is `true`.
     public var primaryBlocker: StartupBlocker? {
         for kind in PermissionKind.allCases {
@@ -158,6 +168,8 @@ public struct PermissionSnapshot: Sendable, Equatable {
                 return .speechRecognitionDenied
             case .screenRecording:
                 return s == .requiresRestart ? .screenRecordingRequiresRestart : .screenRecordingDenied
+            case .systemAudioRecording:
+                return .systemAudioRecordingDenied
             }
         }
         return nil
@@ -189,6 +201,7 @@ public enum StartupBlocker: Sendable, Equatable {
     case speechRecognitionDenied
     case screenRecordingDenied
     case screenRecordingRequiresRestart
+    case systemAudioRecordingDenied
     case localeUnsupported(String)
     case assetInstallFailed(String)
     case captureStopped(String)
@@ -209,7 +222,7 @@ public enum StartupBlocker: Sendable, Equatable {
             )
         case .screenRecordingDenied:
             return PermissionGuidance(
-                message: "Screen Recording access is required to capture meeting audio. "
+                message: "Screen Recording access is required to find the meeting app and read its window titles. "
                     + "Open System Settings › Privacy & Security › Screen Recording and enable Alembic.",
                 settingsURLString: PermissionKind.screenRecording.settingsURLString
             )
@@ -219,6 +232,13 @@ public enum StartupBlocker: Sendable, Equatable {
                     + "Quit & Reopen to finish enabling capture.",
                 settingsURLString: PermissionKind.screenRecording.settingsURLString,
                 suggestsRestart: true
+            )
+        case .systemAudioRecordingDenied:
+            return PermissionGuidance(
+                message: "System Audio Recording access is required to capture the meeting's audio. "
+                    + "Open System Settings › Privacy & Security › Screen & System Audio Recording "
+                    + "and enable Alembic under System Audio Recording Only.",
+                settingsURLString: PermissionKind.systemAudioRecording.settingsURLString
             )
         case .localeUnsupported(let id):
             return PermissionGuidance(

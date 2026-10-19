@@ -23,6 +23,17 @@ public struct AudioProcessMonitor: Sendable {
         return objectIDs.compactMap { buildState(for: $0) }.filter { $0.pid != ownPID }
     }
 
+    /// Every audio-registered process object with its PID and bundle ID
+    /// (empty when the process has none — e.g. a CLI helper), unfiltered. The
+    /// raw list `ProcessTapCapture` narrows to the meeting app's family.
+    func processObjects() -> [(objectID: AudioObjectID, pid: Int32, bundleID: String)] {
+        guard let objectIDs = processObjectList() else { return [] }
+        return objectIDs.compactMap { id in
+            guard let pid = readPID(from: id) else { return nil }
+            return (objectID: id, pid: pid, bundleID: readBundleID(from: id) ?? "")
+        }
+    }
+
     // MARK: - Private helpers
 
     private func processObjectList() -> [AudioObjectID]? {

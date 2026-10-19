@@ -284,10 +284,15 @@ final class AppModel {
         }
 
         // First-run permissions gate: refuse a doomed capture with a clear,
-        // actionable message instead of silently no-oping. The three permissions
+        // actionable message instead of silently no-oping. The permissions
         // fail independently; surface the most relevant blocker (Screen Recording
         // may need an app restart even after the user grants it).
         permissions.refresh()
+        // System Audio Recording arrived after the other grants: ask for it
+        // the first time a recording starts instead of refusing the meeting.
+        if permissions.systemAudioRecording == .unknown {
+            await permissions.requestSystemAudioRecording()
+        }
         if !permissions.isReadyToRecord {
             startupBlocker = permissions.primaryBlocker
             preparationError = startupBlocker?.guidance.message

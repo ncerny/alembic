@@ -31,8 +31,14 @@ box only when the **Expected result** is observed.
 - [ ] The app shows a **"Quit & Reopen"** action (not a misleading "denied")
       for Screen Recording. **Expected:** `requiresRestart` guidance is shown.
 - [ ] Use **Quit & Reopen**. **Expected:** after relaunch, Screen Recording is
-      effective (`CGPreflightScreenCaptureAccess()` true) and all three
-      permissions read as granted; recording is no longer blocked.
+      effective (`CGPreflightScreenCaptureAccess()` true).
+- [ ] On **Start**, macOS prompts for **System Audio Recording** (once).
+      Allow it. **Expected:** all four permissions read as granted; recording
+      starts and the meeting app's audio is transcribed as "them".
+- [ ] While recording, trigger a notification (e.g. a Teams chat message).
+      **Expected:** the banner appears normally, and
+      `log show --last 5m --predicate 'process == "NotificationCenter" AND eventMessage CONTAINS "Set auxiliary state"'`
+      shows no `isScreenShared=1` for the session.
 - [ ] (Optional) Deny one permission and confirm the corresponding actionable
       guidance + System Settings deep-link appears for that permission only.
 
