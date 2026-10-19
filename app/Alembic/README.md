@@ -42,6 +42,33 @@ bash build.sh --help        # usage
 The app is **menu-bar-only** (`LSUIElement`): after launch there is no Dock icon
 and no window — look for the Alembic icon in the macOS menu bar.
 
+## CI & releases
+
+- **CI** (`.github/workflows/ci.yml`) runs on every pull request and push to `main` on a
+  `macos-26` runner: `swift run AlembicCheck`, the privacy audit, and `bash build.sh`
+  (ad-hoc signed, to prove the bundle assembles).
+- **Releases** (`.github/workflows/release.yml`) use
+  [release-please](https://github.com/googleapis/release-please): every push to `main`
+  updates a release PR whose version and `CHANGELOG.md` come from Conventional Commits
+  (`fix:` → patch, `feat:` → minor; before 1.0.0 a breaking change bumps minor).
+  Merging that PR tags `vX.Y.Z`, creates the GitHub Release, and a macOS job builds the
+  tag, signs it with the **Alembic Self-Signed** identity (same as local builds, so
+  permission grants survive updates), and attaches
+  `Alembic-X.Y.Z-macos-arm64.zip` plus its `.sha256`.
+- Version source: `release-please-config.json` / `.release-please-manifest.json`; the
+  `x-release-please-version` marker keeps `CFBundleShortVersionString` in `Info.plist` in
+  sync. Release builds stamp it from the tag and set `CFBundleVersion` to the run number:
+
+  ```bash
+  ALEMBIC_VERSION=1.2.3 ALEMBIC_BUILD_NUMBER=42 bash build.sh
+  ```
+
+- Signing secrets: `ALEMBIC_SIGNING_P12_BASE64` and `ALEMBIC_SIGNING_P12_PASSWORD` hold
+  only the Alembic Self-Signed identity (PKCS#12). They are used solely by the release
+  build job, which imports them into a throwaway keychain. If the certificate is ever
+  recreated (`build.sh --make-cert`), re-export it and update both secrets, or releases
+  and local builds will have different identities and permissions will re-prompt.
+
 ## Signing & permissions
 
 macOS TCC keys permission grants — **especially Screen Recording** — to the

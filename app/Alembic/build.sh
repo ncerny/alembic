@@ -25,6 +25,12 @@
 # You can also point at any identity you already have via the environment:
 #   ALEMBIC_CODESIGN_IDENTITY="Apple Development: you@example.com" bash build.sh
 #
+# Release builds stamp the bundle version from the environment (CI does this):
+#   ALEMBIC_VERSION=1.2.3 ALEMBIC_BUILD_NUMBER=42 bash build.sh
+# ALEMBIC_VERSION sets CFBundleShortVersionString (MAJOR.MINOR.PATCH) and
+# ALEMBIC_BUILD_NUMBER sets CFBundleVersion (a positive integer). Both are
+# optional; without them the values in Info.plist are used as-is.
+#
 # Without a stable identity the script still works (ad-hoc) but prints a warning
 # that permissions will reset on every rebuild.
 #
@@ -44,7 +50,9 @@
 set -euo pipefail
 
 usage() {
-    sed -n '2,46p' "$0" | sed 's/^#\{1,\} \{0,1\}//'
+    # Print the leading comment block (everything after the shebang up to the
+    # first non-comment line), without the comment markers.
+    awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
 }
 
 # Stable identity used for TCC-persistent local signing. Override with
@@ -120,6 +128,16 @@ for arg in "$@"; do
     esac
 done
 
+# Validate optional version stamping up front, before the (slow) build.
+if [[ -n "${ALEMBIC_VERSION:-}" && ! "$ALEMBIC_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "error: ALEMBIC_VERSION must be MAJOR.MINOR.PATCH (got '${ALEMBIC_VERSION}')." >&2
+    exit 2
+fi
+if [[ -n "${ALEMBIC_BUILD_NUMBER:-}" && ! "$ALEMBIC_BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: ALEMBIC_BUILD_NUMBER must be a positive integer (got '${ALEMBIC_BUILD_NUMBER}')." >&2
+    exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUTPUT_DIR="${SCRIPT_DIR}/build"
 EXECUTABLE="Alembic"
@@ -145,6 +163,14 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_DIR/MacOS"
 cp "$BIN_PATH/$EXECUTABLE" "$APP_DIR/MacOS/$EXECUTABLE"
 cp "$SCRIPT_DIR/Info.plist" "$APP_DIR/Info.plist"
+if [[ -n "${ALEMBIC_VERSION:-}" ]]; then
+    echo "==> Stamping version ${ALEMBIC_VERSION}…"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${ALEMBIC_VERSION}" "$APP_DIR/Info.plist"
+fi
+if [[ -n "${ALEMBIC_BUILD_NUMBER:-}" ]]; then
+    echo "==> Stamping build number ${ALEMBIC_BUILD_NUMBER}…"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${ALEMBIC_BUILD_NUMBER}" "$APP_DIR/Info.plist"
+fi
 
 # Codesign so the bundle has an identity for TCC permission grants. Prefer a
 # STABLE identity (so grants survive rebuilds); fall back to ad-hoc with a loud
