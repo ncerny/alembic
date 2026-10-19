@@ -79,4 +79,18 @@ public enum AudioMath {
         }
         return mono
     }
+
+    /// Downmix a whole Core Audio buffer list to mono: each buffer is first
+    /// downmixed from its own interleaved channels, then the per-buffer results
+    /// are averaged. Covers both layouts a process tap / aggregate device can
+    /// deliver — one interleaved buffer with N channels, or N single-channel
+    /// (non-interleaved) buffers — without needing the format flags.
+    ///
+    /// - Parameter buffers: each buffer's samples and its `mNumberChannels`.
+    public static func downmixBuffersToMono(_ buffers: [(samples: [Float], channelCount: Int)]) -> [Float] {
+        let perBuffer = buffers
+            .filter { !$0.samples.isEmpty }
+            .map { downmixInterleavedToMono($0.samples, channelCount: $0.channelCount) }
+        return downmixChannelsToMono(perBuffer)
+    }
 }

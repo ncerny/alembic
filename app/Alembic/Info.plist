@@ -23,5 +23,7 @@
     <string>Alembic uses on-device speech recognition to transcribe meeting audio in real time.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Alembic captures your microphone to transcribe what you say in the meeting.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Alembic records the meeting app's audio on this Mac to transcribe what other participants say. Audio never leaves your Mac.</string>
 </dict>
 </plist>

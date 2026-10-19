@@ -6,62 +6,6 @@ import CoreVideo
 import CoreGraphics
 import AppKit
 
-// MARK: - SCStream output sink (runs on the capture queue, not the actor)
-
-/// Receives `SCStream` audio callbacks on the sample-handler queue and converts
-/// each `CMSampleBuffer` into a `Sendable` `AudioChunk` **before** yielding it,
-/// so no Apple buffer ever crosses an actor boundary. It also never `await`s the
-/// orchestrator from the callback — it only `yield`s on `Sendable` continuations.
-///
-/// `@unchecked Sendable` is justified: every stored property is itself `Sendable`
-/// (`SessionClock` is a value type; `AsyncStream.Continuation` is `Sendable`) and
-/// the object holds **no mutable state**, so concurrent callbacks are safe.
-final class StreamAudioOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
-    private let clock: SessionClock
-    private let chunks: AsyncStream<AudioChunk>.Continuation
-    private let meters: AsyncStream<MeterUpdate>.Continuation
-    private let errors: AsyncStream<CaptureSourceError>.Continuation
-
-    init(
-        clock: SessionClock,
-        chunks: AsyncStream<AudioChunk>.Continuation,
-        meters: AsyncStream<MeterUpdate>.Continuation,
-        errors: AsyncStream<CaptureSourceError>.Continuation
-    ) {
-        self.clock = clock
-        self.chunks = chunks
-        self.meters = meters
-        self.errors = errors
-    }
-
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio else { return }
-        guard let block = AudioBufferConversion.decode(sampleBuffer: sampleBuffer) else { return }
-
-        // ScreenCaptureKit presentation timestamps are on the host time clock, so
-        // they share a basis with the mic's `AVAudioTime.hostTime` and with the
-        // session origin captured via `HostClock.now()`. Fall back to "now" only
-        // if a buffer arrives without a valid PTS.
-        let platformSeconds = block.presentationSeconds ?? HostClock.now()
-        let chunk = AudioChunk(
-            samples: block.monoSamples,
-            sampleRate: block.sampleRate,
-            channelCount: block.originalChannelCount,
-            source: .them,
-            startTime: clock.sessionTime(forPlatformTime: platformSeconds)
-        )
-        chunks.yield(chunk)
-        meters.yield(MeterUpdate(source: .them, level: .measuring(block.monoSamples)))
-    }
-
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        errors.yield(.streamStopped(error.localizedDescription))
-        // A fatal stream stop ends the "them" side; finish the multiplexed stream
-        // so consumers unblock. The orchestrator (Phase 6) decides recovery policy.
-        chunks.finish()
-    }
-}
-
 // MARK: - Phase 4: gated meeting-window video-frame stream
 
 /// The concrete capture configuration `ScreenCaptureKitSource` is constructed
@@ -124,67 +68,52 @@ public struct CapturedFrame: Sendable {
 /// grep. This type is a testability seam only: `start(target:)` does not
 /// consume it to drive construction — it exists so the *shape* of what
 /// production code does can be asserted independently of runtime
-/// `SCStream`/`NSScreen` availability under CLT.
+/// `SCStream`/Core Audio/`NSScreen` availability under CLT.
 package struct ScreenCaptureConfigurationPlan: Sendable, Equatable {
-    /// Which process-ID scope the audio stream's content-filter **display**
-    /// selection is drawn from. Must always be `.singleMatchedApp` — the
-    /// same single `SCRunningApplication` passed to
-    /// `SCContentFilter(display:including:)` — never the broader PID family
-    /// (`.pidFamily`) used only for meeting-window/video resolution. Using
-    /// the wider family for the audio display can select a display where a
-    /// *different* helper/renderer process in the family has a window while
-    /// the included `app` itself has none there, producing an effectively
-    /// empty filter — the exact regression this enum's single fixed value
-    /// (`.singleMatchedApp`) exists to lock in.
-    package enum AudioDisplayPIDScope: Sendable, Equatable {
-        case singleMatchedApp
-        case pidFamily
+    /// How the meeting ("them") audio is captured. Always `.coreAudioProcessTap`
+    /// — modeled explicitly so a regression back to an `SCStream` audio
+    /// capture (which marks the screen as shared and silences notifications
+    /// for the whole meeting) is a visible, asserted change.
+    package enum AudioCaptureMechanism: Sendable, Equatable {
+        case coreAudioProcessTap
+        case screenCaptureKitStream
     }
 
     package struct AudioPlan: Sendable, Equatable {
-        package let width: Int
-        package let height: Int
-        package let capturesAudio: Bool
-        package let sampleHandlerQoS: DispatchQoS.QoSClass
-        /// Always `.singleMatchedApp` — see `AudioDisplayPIDScope`.
-        package let displayPIDScope: AudioDisplayPIDScope
-        /// `true` iff the audio filter's `including:` list is exactly the
-        /// single matched `SCRunningApplication` (`[app]`) — never the app's
-        /// wider PID family and never `nil`/all-apps. Modeled as a `Bool`
-        /// for the same reason `VideoPlan.usesWindowScopedFilter` is: a real
-        /// `SCContentFilter` cannot be constructed without a live
-        /// `SCShareableContent` app/display.
-        package let filterIncludesSingleMatchedAppOnly: Bool
+        package let mechanism: AudioCaptureMechanism
+        /// The tap includes the target app's whole process family (bundle
+        /// children + processes it is responsible for), never Alembic itself.
+        package let tapsAppProcessFamily: Bool
         package let excludesCurrentProcessAudio: Bool
-        package let channelCount: Int
-        package let sampleRate: Double
-        package let minimumFrameIntervalFPS: Double
-        package let showsCursor: Bool
+        /// The user keeps hearing the call (`CATapMuteBehavior.unmuted`).
+        package let unmuted: Bool
+        /// The tap is visible only to Alembic.
+        package let privateTap: Bool
+        /// The aggregate device holds only the tap — no hardware sub-device —
+        /// so capture survives output-device changes.
+        package let aggregateHasHardwareSubDevice: Bool
+        /// The tap re-targets as the family's audio processes come and go.
+        package let followsProcessChanges: Bool
+        package let sampleHandlerQoS: DispatchQoS.QoSClass
 
         package init(
-            width: Int,
-            height: Int,
-            capturesAudio: Bool,
-            sampleHandlerQoS: DispatchQoS.QoSClass,
-            displayPIDScope: AudioDisplayPIDScope,
-            filterIncludesSingleMatchedAppOnly: Bool,
+            mechanism: AudioCaptureMechanism,
+            tapsAppProcessFamily: Bool,
             excludesCurrentProcessAudio: Bool,
-            channelCount: Int,
-            sampleRate: Double,
-            minimumFrameIntervalFPS: Double,
-            showsCursor: Bool
+            unmuted: Bool,
+            privateTap: Bool,
+            aggregateHasHardwareSubDevice: Bool,
+            followsProcessChanges: Bool,
+            sampleHandlerQoS: DispatchQoS.QoSClass
         ) {
-            self.width = width
-            self.height = height
-            self.capturesAudio = capturesAudio
-            self.sampleHandlerQoS = sampleHandlerQoS
-            self.displayPIDScope = displayPIDScope
-            self.filterIncludesSingleMatchedAppOnly = filterIncludesSingleMatchedAppOnly
+            self.mechanism = mechanism
+            self.tapsAppProcessFamily = tapsAppProcessFamily
             self.excludesCurrentProcessAudio = excludesCurrentProcessAudio
-            self.channelCount = channelCount
-            self.sampleRate = sampleRate
-            self.minimumFrameIntervalFPS = minimumFrameIntervalFPS
-            self.showsCursor = showsCursor
+            self.unmuted = unmuted
+            self.privateTap = privateTap
+            self.aggregateHasHardwareSubDevice = aggregateHasHardwareSubDevice
+            self.followsProcessChanges = followsProcessChanges
+            self.sampleHandlerQoS = sampleHandlerQoS
         }
     }
 
@@ -229,9 +158,8 @@ package struct ScreenCaptureConfigurationPlan: Sendable, Equatable {
     }
 
     /// Always present, identical for every `mode` and every
-    /// `meetingWindowResolved` value — every field here mirrors the literal
-    /// constants/scope `start(target:)`'s audio-stream construction block
-    /// uses (§0.1/HIGH-1).
+    /// `meetingWindowResolved` value — every field here mirrors what
+    /// `ProcessTapCapture` (started by `start(target:)`) constructs.
     package let audio: AudioPlan
     /// `nil` unless `mode == .audioPlusAttribution && meetingWindowResolved`
     /// — the single condition that ever produces a video plan.
@@ -247,17 +175,14 @@ package struct ScreenCaptureConfigurationPlan: Sendable, Equatable {
     /// ScreenCaptureKit/AppKit state — the whole point of the seam.
     package static func plan(for mode: ScreenCaptureMode, meetingWindowResolved: Bool) -> ScreenCaptureConfigurationPlan {
         let audio = AudioPlan(
-            width: 2,
-            height: 2,
-            capturesAudio: true,
-            sampleHandlerQoS: .userInitiated,
-            displayPIDScope: .singleMatchedApp,
-            filterIncludesSingleMatchedAppOnly: true,
+            mechanism: .coreAudioProcessTap,
+            tapsAppProcessFamily: true,
             excludesCurrentProcessAudio: true,
-            channelCount: 2,
-            sampleRate: 48_000,
-            minimumFrameIntervalFPS: 1,
-            showsCursor: false
+            unmuted: true,
+            privateTap: true,
+            aggregateHasHardwareSubDevice: false,
+            followsProcessChanges: true,
+            sampleHandlerQoS: .userInitiated
         )
         guard mode == .audioPlusAttribution, meetingWindowResolved else {
             return ScreenCaptureConfigurationPlan(audio: audio, video: nil)
@@ -314,10 +239,10 @@ package enum FrameMetadataExtractor {
 /// Receives `SCStream` `.screen` callbacks on the video-only sample-handler
 /// queue and converts each `CMSampleBuffer` into a `Sendable` `CapturedFrame`
 /// **before** yielding it, so no `CVPixelBuffer`/`CMSampleBuffer` ever crosses
-/// an actor boundary. Structurally parallel to `StreamAudioOutput`; its own
-/// delegate slot on the video-only `SCStream`, entirely separate from
-/// `StreamAudioOutput`'s delegate slot on the audio `stream` — a video-stream
-/// failure ends attribution capture only, never the audio/transcript side.
+/// an actor boundary. It is the delegate of the video-only `SCStream`,
+/// entirely separate from the meeting-audio `ProcessTapCapture` — a
+/// video-stream failure ends attribution capture only, never the
+/// audio/transcript side.
 ///
 /// impl-review-2 HIGH-1: this type holds **no reference at all** to the
 /// fatal `errors` continuation — only to `diagnostics`
@@ -326,9 +251,8 @@ package enum FrameMetadataExtractor {
 /// future edit to accidentally yield onto, so a video-only failure cannot
 /// reach `MeetingSession`'s fatal `handleSourceError` path even by mistake.
 ///
-/// `@unchecked Sendable` is justified exactly as `StreamAudioOutput`'s is:
-/// every stored property is itself `Sendable`, and the object holds no other
-/// mutable state.
+/// `@unchecked Sendable` is justified: every stored property is itself
+/// `Sendable`, and the object holds no other mutable state.
 final class StreamFrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private let clock: SessionClock
     private let frames: AsyncStream<CapturedFrame>.Continuation
@@ -390,23 +314,28 @@ final class StreamFrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unch
 
 // MARK: - macOS AudioSource
 
-/// macOS `AudioSource` built on ScreenCaptureKit (meeting/"them" audio) plus
-/// `AVAudioEngine` (microphone/"you" audio), multiplexed onto one tagged
-/// `buffers` stream with session-relative timestamps.
+/// macOS `AudioSource`: a Core Audio process tap on the meeting app
+/// (`ProcessTapCapture`, "them" audio) plus `AVAudioEngine` (microphone/"you"
+/// audio), multiplexed onto one tagged `buffers` stream with session-relative
+/// timestamps. ScreenCaptureKit is used only to enumerate capture targets and,
+/// when attribution is enabled, for the meeting-window video stream — never for
+/// audio, because an active `SCStream` marks the screen as shared and silences
+/// notifications for the whole meeting.
 ///
 /// ## Concurrency model (Swift 6 strict)
-/// - Lifecycle/mutable state (`SCStream`, `AVAudioEngine`, stop flag) lives on
-///   this `actor`.
-/// - The hot audio paths run **off** the actor: the `SCStream` callback lands on
-///   `StreamAudioOutput`, and the mic tap closure captures only `Sendable`
-///   values. Both convert their non-`Sendable` Apple buffer to an `AudioChunk`
-///   immediately and `yield` it — never `await`ing the actor or the analyzer.
+/// - Lifecycle/mutable state (tap, `AVAudioEngine`, stop flag) lives on this
+///   `actor`.
+/// - The hot audio paths run **off** the actor: the tap's IOProc runs on
+///   `ProcessTapCapture`'s queue, and the mic tap closure captures only
+///   `Sendable` values. Both convert their non-`Sendable` Apple buffer to an
+///   `AudioChunk` immediately and `yield` it — never `await`ing the actor or
+///   the analyzer.
 ///
 /// ## Timestamps
 /// One `SessionClock` is created at `start` with origin = `HostClock.now()`.
-/// `SCStream` PTS seconds and the mic's `AVAudioTime.hostTime` both reduce to the
-/// same host-time seconds basis, so subtracting the single origin yields one
-/// shared session timeline for both sides.
+/// The tap IOProc's input host time and the mic's `AVAudioTime.hostTime` both
+/// reduce to the same host-time seconds basis, so subtracting the single origin
+/// yields one shared session timeline for both sides.
 ///
 /// ## Video path (Phase 4, gated by `mode`)
 /// When constructed with `mode: .audioPlusAttribution`, `start(target:)` also
@@ -422,8 +351,8 @@ final class StreamFrameOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unch
 /// same `HostClock`/`SessionClock` basis as audio, SR-7) and their pixel
 /// payload is copied into an owned `Data` by `validatedPixelCopy` only after
 /// validating the buffer's real format/geometry (SR-4) — no `CVPixelBuffer`/
-/// `CMSampleBuffer` ever crosses the actor boundary. The audio `SCStream`'s
-/// construction code above never reads `mode` at all: with `mode ==
+/// `CMSampleBuffer` ever crosses the actor boundary. The audio tap's
+/// construction code never reads `mode` at all: with `mode ==
 /// .audioOnly` (every call site until Phase 6), behavior is byte-identical to
 /// before this phase landed (UR-4). A video-stream failure surfaces **only**
 /// on `attributionDiagnostics` and finishes only `frames` — it is never
@@ -441,9 +370,9 @@ public actor ScreenCaptureKitSource: AudioSource {
     /// Live input meters for both sources (`.you` mic + `.them` meeting audio).
     /// Consumed by the orchestrator/UI in Phases 6/7.
     public nonisolated let meterUpdates: AsyncStream<MeterUpdate>
-    /// Out-of-band **fatal** capture errors — audio/mic/base-stream failures
-    /// only (e.g. the audio `SCStream`'s `didStopWithError`, the mic
-    /// `AVAudioEngine` failing to start). A message on this stream is treated
+    /// Out-of-band **fatal** capture errors — audio/mic failures only (e.g.
+    /// the meeting-audio tap device dying, the mic `AVAudioEngine` failing to
+    /// start). A message on this stream is treated
     /// as terminal by `MeetingSession.handleSourceError` (flush + close the
     /// session), so nothing video/attribution-only may ever be yielded here —
     /// see `attributionDiagnostics` below for that (impl-review-2 HIGH-1).
@@ -473,12 +402,14 @@ public actor ScreenCaptureKitSource: AudioSource {
 
     // MARK: Capture state (actor-isolated)
 
-    private var stream: SCStream?
-    private var output: StreamAudioOutput?
+    private var tap: ProcessTapCapture?
     private var videoStream: SCStream?
     private var frameOutput: StreamFrameOutput?
     private var videoStartupTask: Task<Void, Never>?
     private var engine: AVAudioEngine?
+    /// The mic's contiguous timeline; shared across tap reinstalls so a device
+    /// change continues the same timeline instead of restarting it.
+    private var micTimeline: LockedAudioTimeline?
     private var clock: SessionClock?
     private var configObserver: (any NSObjectProtocol)?
     private var didStop = false
@@ -582,14 +513,12 @@ public actor ScreenCaptureKitSource: AudioSource {
     }
 
     public func start(target: CaptureTarget) async throws {
-        guard !didStop, stream == nil else { return }
+        guard !didStop, tap == nil else { return }
 
         // NOTE (minimized-Teams / no-frames): ScreenCaptureKit only renders
         // video frames for windows that are actually on-screen. A minimized or
-        // hidden meeting window may deliver no *video* frames — irrelevant for
-        // audio transcription. The display used in the content filter is chosen
-        // based on where the app's windows live (see below) to satisfy macOS 26's
-        // requirement that the filter's display and app windows overlap.
+        // hidden meeting window may deliver no *video* frames to the opt-in
+        // attribution stream — irrelevant for audio, which is a process tap.
         try await CapturePreflight.requireForCapture()
 
         // Single session origin shared by both pipelines.
@@ -597,17 +526,14 @@ public actor ScreenCaptureKitSource: AudioSource {
         self.clock = clock
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        guard let app = content.applications.first(where: { Self.matches(target, $0) }) else {
+        guard content.applications.contains(where: { Self.matches(target, $0) }) else {
             throw CaptureSourceError.targetNotFound(target.id)
-        }
-        guard !content.displays.isEmpty else {
-            throw CaptureSourceError.noDisplay
         }
 
         // Meeting-window resolution (SR-8) — always attempted (cheap,
         // side-effect-free) regardless of `mode`, so this computation
-        // genuinely cannot influence the audio-only path below: the audio
-        // stream's construction never reads `meetingWindow`/`pids` at all.
+        // genuinely cannot influence the audio path below: the audio tap's
+        // construction never reads `meetingWindow`/`pids` at all.
         // Reuses the same PID-family resolution and catalog title-hint/
         // exclusion/bounds-floor policy `WindowTitleProbe.swift` already
         // encodes, rather than a weaker parallel implementation.
@@ -640,64 +566,17 @@ public actor ScreenCaptureKitSource: AudioSource {
         )
         let meetingWindow: SCWindow? = meetingWindowID.flatMap { id in content.windows.first { Int($0.windowID) == id } }
 
-        // macOS 26: SCContentFilter(display:including:exceptingWindows:) requires at
-        // least one window from the app on the specified display. Pick the display that
-        // contains one of the app's windows so the filter is never empty — this prevents
-        // an immediate "Failed to find any displays or windows to capture" stream error
-        // when the app window lives on a secondary display. Falls back to the first
-        // display when the app has no enumerated windows (e.g. hidden/minimised).
-        // Deliberately the single matched app's PID (`app.processID`), **not**
-        // the broader `pids` process family used for meeting-window resolution
-        // above: the content filter below is `including: [app]` — a single
-        // `SCRunningApplication` — so the display must be chosen from windows
-        // that same single app actually owns. Using the wider family here can
-        // select a display where only a *different* helper/renderer process in
-        // the family has a window while `app` itself has none there, producing
-        // an effectively empty filter (SCK's "no displays or windows to
-        // capture" failure) even though `appWindows` looked non-empty. This
-        // restores the pre-Phase-4 behavior exactly (HEAD) for the audio path,
-        // which must stay byte-identical regardless of `mode`.
-        let appPID = app.processID
-        let appWindows = content.windows.filter { $0.owningApplication?.processID == appPID }
-        let display: SCDisplay = appWindows.lazy
-            .compactMap { w in content.displays.first { $0.frame.intersects(w.frame) } }
-            .first ?? content.displays[0]
+        // Meeting ("them") audio: a Core Audio process tap on the target app's
+        // process family — deliberately NOT an `SCStream`. Any active
+        // ScreenCaptureKit stream makes macOS treat the screen as shared,
+        // which (with "Allow notifications when mirroring or sharing the
+        // display" off) silences every notification for the whole meeting.
+        let tap = ProcessTapCapture(targetID: target.id, canonicalBundlePrefix: canonicalPrefix)
+        try tap.start(clock: clock, chunks: chunkContinuation, meters: meterContinuation, errors: errorContinuation)
+        self.tap = tap
 
-        let config = SCStreamConfiguration()
-        config.capturesAudio = true
-        config.excludesCurrentProcessAudio = true
-        config.channelCount = 2
-        config.sampleRate = 48_000
-        // Audio-only: minimize the video plane. NOTE: a *minimized* Teams window
-        // may not render video frames at all — irrelevant for audio capture here,
-        // but it will matter if a future phase adds video/OCR speaker attribution.
-        config.width = 2
-        config.height = 2
-        // Without a frame-interval cap, SCK asks WindowServer to composite the
-        // captured app at the display refresh rate for the whole meeting, purely
-        // to produce frames we discard. 1 fps keeps the capture-side cost
-        // negligible; audio delivery is unaffected.
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-        config.showsCursor = false
-
-        let filter = SCContentFilter(display: display, including: [app], exceptingWindows: [])
-        let output = StreamAudioOutput(
-            clock: clock,
-            chunks: chunkContinuation,
-            meters: meterContinuation,
-            errors: errorContinuation
-        )
-        let stream = SCStream(filter: filter, configuration: config, delegate: output)
-        // .userInitiated is ample for 48 kHz audio chunks; .userInteractive made
-        // the callbacks compete with UI event handling (ours and the meeting
-        // app's) for the highest QoS band.
-        try stream.addStreamOutput(output, type: .audio, sampleHandlerQueue: DispatchQueue.global(qos: .userInitiated))
-        try await stream.startCapture()
-        self.output = output
-        self.stream = stream
-
-        // Local microphone ("you") starts immediately after the app-level
-        // audio stream, and unconditionally before any video-stream work
+        // Local microphone ("you") starts immediately after the meeting-audio
+        // tap, and unconditionally before any video-stream work
         // below — regardless of `mode`. Attribution's video stream is
         // optional/best-effort and, per macOS 26's display-overlap
         // requirement and WindowServer/TCC behavior, can be slow to create or
@@ -706,7 +585,7 @@ public actor ScreenCaptureKitSource: AudioSource {
         // the "you" audio path).
         try startMic(clock: clock)
 
-        // Video-frame stream (Phase 4, gated): the block above never reads
+        // Video-frame stream (Phase 4, gated): the audio code above never reads
         // `mode` — it is identical text regardless of the mode's value, the
         // strongest possible guarantee that the audio path cannot regress
         // when attribution is enabled. Attribution capture is best-effort and
@@ -838,10 +717,8 @@ public actor ScreenCaptureKitSource: AudioSource {
             NotificationCenter.default.removeObserver(configObserver)
             self.configObserver = nil
         }
-        if let stream {
-            try? await stream.stopCapture()
-            self.stream = nil
-        }
+        tap?.stop()
+        tap = nil
         videoStartupTask?.cancel()
         videoStartupTask = nil
         if let videoStream {
@@ -854,7 +731,6 @@ public actor ScreenCaptureKitSource: AudioSource {
             engine.stop()
             self.engine = nil
         }
-        output = nil
 
         chunkContinuation.finish()
         meterContinuation.finish()
@@ -872,7 +748,9 @@ public actor ScreenCaptureKitSource: AudioSource {
 
     private func startMic(clock: SessionClock) throws {
         let engine = AVAudioEngine()
-        installMicTap(on: engine, clock: clock)
+        let timeline = LockedAudioTimeline()
+        micTimeline = timeline
+        installMicTap(on: engine, clock: clock, timeline: timeline)
         do {
             try engine.start()
         } catch {
@@ -883,9 +761,17 @@ public actor ScreenCaptureKitSource: AudioSource {
     }
 
     /// Installs the mic tap. The tap closure captures only `Sendable` values
-    /// (continuations + the value-type clock) and converts each buffer to an
-    /// `AudioChunk` inline — it never touches actor state or `await`s.
-    private func installMicTap(on engine: AVAudioEngine, clock: SessionClock) {
+    /// (continuations, the value-type clock, the lock-guarded timeline) and
+    /// converts each buffer to `AudioChunk`s inline — it never touches actor
+    /// state or `await`s.
+    ///
+    /// Mic audio is placed on a `ContiguousAudioTimeline`, exactly like the
+    /// meeting-audio tap: the analyzer times results by audio fed, so both
+    /// sides must start at session time 0. Without it, the mic's first sample
+    /// (which only arrives after target lookup, tap setup, and engine start)
+    /// would be stamped 0 and every "you" line would run early relative to
+    /// "them" by that whole startup delay.
+    private func installMicTap(on engine: AVAudioEngine, clock: SessionClock, timeline: LockedAudioTimeline) {
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         let chunks = chunkContinuation
@@ -895,14 +781,16 @@ public actor ScreenCaptureKitSource: AudioSource {
             let platformSeconds = when.isHostTimeValid
                 ? HostClock.seconds(fromMachHostTime: when.hostTime)
                 : HostClock.now()
-            let chunk = AudioChunk(
-                samples: block.monoSamples,
-                sampleRate: block.sampleRate,
-                channelCount: block.originalChannelCount,
-                source: .you,
-                startTime: clock.sessionTime(forPlatformTime: platformSeconds)
-            )
-            chunks.yield(chunk)
+            let start = clock.sessionTime(forPlatformTime: platformSeconds)
+            timeline.place(block.monoSamples, sampleRate: block.sampleRate, at: start) { segment in
+                chunks.yield(AudioChunk(
+                    samples: segment.samples,
+                    sampleRate: segment.sampleRate,
+                    channelCount: block.originalChannelCount,
+                    source: .you,
+                    startTime: segment.start
+                ))
+            }
             meters.yield(MeterUpdate(source: .you, level: .measuring(block.monoSamples)))
         }
     }
@@ -924,9 +812,9 @@ public actor ScreenCaptureKitSource: AudioSource {
     }
 
     private func handleConfigurationChange(clock: SessionClock) {
-        guard !didStop, let engine else { return }
+        guard !didStop, let engine, let micTimeline else { return }
         engine.inputNode.removeTap(onBus: 0)
-        installMicTap(on: engine, clock: clock)
+        installMicTap(on: engine, clock: clock, timeline: micTimeline)
         if !engine.isRunning {
             try? engine.start()
         }
@@ -1218,5 +1106,28 @@ public actor ScreenCaptureKitSource: AudioSource {
     /// processes. The user can still pick any target from the full list.
     public func availableTeamsTargets() async throws -> [CaptureTarget] {
         try await availableTargets().filter(Self.isLikelyTeams)
+    }
+}
+
+// MARK: - Mic timeline
+
+/// Lock-guarded `ContiguousAudioTimeline` for the mic tap callback, which runs
+/// on an audio thread and is reinstalled after input-device changes.
+/// Segments are emitted while the lock is held so they never interleave.
+private final class LockedAudioTimeline: @unchecked Sendable {
+    private let lock = NSLock()
+    private var timeline = ContiguousAudioTimeline()
+
+    func place(
+        _ samples: [Float],
+        sampleRate: Double,
+        at start: Double,
+        emit: (ContiguousAudioTimeline.Segment) -> Void
+    ) {
+        lock.withLock {
+            for segment in timeline.place(samples, sampleRate: sampleRate, at: start) {
+                emit(segment)
+            }
+        }
     }
 }

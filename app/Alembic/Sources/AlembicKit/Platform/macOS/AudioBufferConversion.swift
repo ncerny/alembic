@@ -1,6 +1,6 @@
 import Foundation
 import AVFoundation
-import CoreMedia
+import CoreAudio
 
 /// Conversion from non-`Sendable` Apple audio buffers to plain mono `[Float]`,
 /// performed **at the capture callback boundary** so nothing Apple-specific ever
@@ -8,8 +8,8 @@ import CoreMedia
 ///
 /// All channel-extraction + downmix delegates to the pure `AudioMath` helpers in
 /// the core, which is where the deterministic checks live. These functions only
-/// own the Apple-buffer plumbing (reading `CMBlockBuffer` bytes, interpreting the
-/// `AudioStreamBasicDescription` flags, indexing `floatChannelData`).
+/// own the Apple-buffer plumbing (walking an `AudioBufferList`, indexing
+/// `floatChannelData`).
 enum AudioBufferConversion {
 
     /// A decoded audio block: mono normalized float samples plus the metadata the
@@ -19,74 +19,44 @@ enum AudioBufferConversion {
         let monoSamples: [Float]
         let sampleRate: Double
         let originalChannelCount: Int
-        /// Host-time presentation seconds (`CMTimeGetSeconds`), or `nil` for the
-        /// mic path which carries its time separately via `AVAudioTime`.
+        /// Host-time seconds of the block's first frame (the tap IOProc's input
+        /// timestamp), or `nil` for the mic path, which carries its time
+        /// separately via `AVAudioTime`.
         let presentationSeconds: Double?
     }
 
-    /// Decode an `SCStream` audio `CMSampleBuffer` into a mono block.
+    /// Decode a process-tap `AudioBufferList` (Float32 PCM, as delivered to the
+    /// aggregate device's IOProc) into a mono block.
     ///
-    /// Handles both interleaved and non-interleaved layouts by inspecting
-    /// `kAudioFormatFlagIsNonInterleaved` (the helper's `flags=0x29` stereo case
-    /// is non-interleaved). Returns `nil` if the buffer cannot be read.
-    static func decode(sampleBuffer: CMSampleBuffer) -> DecodedBlock? {
-        guard let formatDesc = sampleBuffer.formatDescription,
-              let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else {
-            return nil
+    /// Reads each buffer's samples and `mNumberChannels` and delegates the
+    /// layout-agnostic downmix to `AudioMath.downmixBuffersToMono`, so one
+    /// interleaved buffer and N non-interleaved buffers both decode correctly.
+    /// Returns `nil` when the list carries no samples.
+    static func decode(
+        bufferList: UnsafePointer<AudioBufferList>,
+        sampleRate: Double,
+        hostSeconds: Double?
+    ) -> DecodedBlock? {
+        let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: bufferList))
+        var buffers: [(samples: [Float], channelCount: Int)] = []
+        var channelCount = 0
+        for buffer in list {
+            guard let data = buffer.mData, buffer.mDataByteSize > 0 else { continue }
+            let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+            let channels = max(Int(buffer.mNumberChannels), 1)
+            buffers.append((
+                samples: Array(UnsafeBufferPointer(start: data.assumingMemoryBound(to: Float.self), count: count)),
+                channelCount: channels
+            ))
+            channelCount += channels
         }
-        let asbd = asbdPtr.pointee
-        let channelCount = Int(asbd.mChannelsPerFrame)
-        let sampleRate = asbd.mSampleRate
-        let nonInterleaved = (asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
-        guard channelCount > 0 else { return nil }
-
-        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
-        let length = CMBlockBufferGetDataLength(block)
-        guard length > 0 else { return nil }
-
-        var data = Data(count: length)
-        let copyStatus = data.withUnsafeMutableBytes { ptr -> OSStatus in
-            guard let base = ptr.baseAddress else { return kCMBlockBufferStructureAllocationFailedErr }
-            return CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: base)
-        }
-        guard copyStatus == kCMBlockBufferNoErr else { return nil }
-
-        let frameCount = CMSampleBufferGetNumSamples(sampleBuffer)
-        guard frameCount > 0 else { return nil }
-
-        let mono: [Float] = data.withUnsafeBytes { raw -> [Float] in
-            let floats = raw.bindMemory(to: Float.self)
-            // Guard against truncated buffers.
-            let available = floats.count
-            guard available >= frameCount * channelCount else {
-                return []
-            }
-            if channelCount == 1 {
-                return Array(floats.prefix(frameCount))
-            }
-            if nonInterleaved {
-                var channels = [[Float]]()
-                channels.reserveCapacity(channelCount)
-                for ch in 0..<channelCount {
-                    let start = ch * frameCount
-                    channels.append(Array(floats[start..<(start + frameCount)]))
-                }
-                return AudioMath.downmixChannelsToMono(channels)
-            } else {
-                let interleaved = Array(floats[0..<(frameCount * channelCount)])
-                return AudioMath.downmixInterleavedToMono(interleaved, channelCount: channelCount)
-            }
-        }
-        guard !mono.isEmpty else { return nil }
-
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let ptsSeconds = pts.isValid ? CMTimeGetSeconds(pts) : nil
-
+        let mono = AudioMath.downmixBuffersToMono(buffers)
+        guard !mono.isEmpty, sampleRate > 0 else { return nil }
         return DecodedBlock(
             monoSamples: mono,
             sampleRate: sampleRate,
             originalChannelCount: channelCount,
-            presentationSeconds: ptsSeconds
+            presentationSeconds: hostSeconds
         )
     }
 

@@ -12,8 +12,8 @@ machine (see [Privacy](#privacy)).
 ## Requirements
 
 - **macOS 26 or later.** The app commits fully to macOS 26+ APIs
-  (`SpeechAnalyzer` / `SpeechTranscriber`, ScreenCaptureKit per-app audio
-  capture). `LSMinimumSystemVersion` is `26.0` and `Package.swift` pins the
+  (`SpeechAnalyzer` / `SpeechTranscriber`, Core Audio process taps for
+  per-app audio capture). `LSMinimumSystemVersion` is `26.0` and `Package.swift` pins the
   platform to `.macOS("26.0")`.
 - **Swift 6 toolchain** via the **Xcode Command Line Tools** (`swift`).
   **Xcode.app is not required** — the build and test commands below run under
@@ -142,7 +142,7 @@ targets:
 1. `bash build.sh` (or `bash build.sh --run`).
 2. `open build/Alembic.app`.
 3. Click the Alembic icon in the menu bar.
-4. Grant the three permissions when prompted (see [Permissions](#permissions)).
+4. Grant the four permissions when prompted (see [Permissions](#permissions)).
 5. Pick the Teams (or other meeting app) capture target, then **Start**.
 6. Watch live captions for both "you" and "them" with input meters and elapsed
    time. **Stop** to drain and save the transcript.
@@ -300,14 +300,23 @@ machine.** Recognition is performed by Apple's **on-device** `SpeechAnalyzer` /
 
 ## Permissions
 
-Alembic needs **three** macOS permissions, which fail independently and each
+Alembic needs **four** macOS permissions, which fail independently and each
 gate recording:
 
 | Permission | Why | `Info.plist` usage string |
 |---|---|---|
 | **Microphone** | Capture your own voice ("you"). | `NSMicrophoneUsageDescription` |
 | **Speech Recognition** | On-device transcription. | `NSSpeechRecognitionUsageDescription` |
-| **Screen Recording** | Per-app audio capture of the meeting app ("them") via ScreenCaptureKit. | granted at runtime via TCC (no usage string) |
+| **System Audio Recording** | Capture the meeting app's audio ("them") with a Core Audio process tap. Listed under *Screen & System Audio Recording › System Audio Recording Only*. Requested explicitly the first time a recording starts. | `NSAudioCaptureUsageDescription` |
+| **Screen Recording** | Enumerate capture targets and read meeting-window titles (detection, file naming); attribution video when enabled. | granted at runtime via TCC (no usage string) |
+
+> **Why a process tap, not ScreenCaptureKit, for audio.** Any active
+> ScreenCaptureKit stream makes macOS treat the screen as *shared*. With
+> *Notifications › Allow notifications when mirroring or sharing the display*
+> off, that silences every notification for the entire meeting. A process tap
+> is not a screen-capture session, so notifications behave normally. The
+> opt-in speaker-attribution video stream still uses ScreenCaptureKit, so it
+> still has this effect while enabled.
 
 > **Screen Recording restart caveat.** macOS grants Screen Recording but
 > `CGPreflightScreenCaptureAccess()` only returns effective *after the app

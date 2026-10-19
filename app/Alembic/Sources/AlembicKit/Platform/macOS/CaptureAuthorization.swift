@@ -7,6 +7,7 @@ import Speech
 ///
 /// Phase 3 scope is deliberately small: report enough about Screen Recording +
 /// Microphone status to *drive* capture and fail with a clear error when denied.
+/// (System Audio Recording, Speech Recognition: see `CapturePreflight`.)
 /// The polished first-run request/onboarding flow is Phase 8.
 public struct CaptureAuthorization: Sendable, Equatable {
 
@@ -83,6 +84,26 @@ public enum CapturePreflight {
         }
     }
 
+    /// System Audio Recording (`kTCCServiceAudioCapture`) status — the grant
+    /// the meeting-audio process tap needs.
+    ///
+    /// There is no public API for this permission, so it is read through the
+    /// TCC SPI (`AudioCaptureTCC`). When that SPI cannot be resolved the status
+    /// is reported as `.authorized`: Alembic cannot gate on it, and Core Audio
+    /// raises the system prompt itself when the tap starts.
+    public static func systemAudioRecordingStatus() -> CaptureAuthorization.Status {
+        AudioCaptureTCC.preflight() ?? .authorized
+    }
+
+    /// Requests System Audio Recording, awaiting the user's response. The
+    /// explicit request matters: the implicit prompt Core Audio raises at tap
+    /// start was observed to go unseen and time out, silently capturing nothing.
+    @discardableResult
+    public static func requestSystemAudioRecording() async -> CaptureAuthorization.Status {
+        if systemAudioRecordingStatus() == .authorized { return .authorized }
+        return await AudioCaptureTCC.request() ?? .authorized
+    }
+
     /// Current combined authorization snapshot (no prompts).
     public static func current() -> CaptureAuthorization {
         CaptureAuthorization(
@@ -155,5 +176,48 @@ public enum CapturePreflight {
             screen = requestScreenRecording()
         }
         guard screen == .authorized else { throw CaptureSourceError.screenRecordingDenied }
+
+        // System Audio Recording: required by the meeting-audio process tap;
+        // request inline when not yet determined so the prompt is visible.
+        var systemAudio = systemAudioRecordingStatus()
+        if systemAudio == .notDetermined {
+            systemAudio = await requestSystemAudioRecording()
+        }
+        guard systemAudio == .authorized else { throw CaptureSourceError.systemAudioRecordingDenied }
+    }
+}
+
+// MARK: - TCC SPI (System Audio Recording)
+
+/// `TCCAccessPreflight` / `TCCAccessRequest` for `kTCCServiceAudioCapture`,
+/// resolved at runtime from the private TCC framework. Every entry point
+/// returns `nil` when the framework or symbol is unavailable so callers can
+/// fall back to Core Audio's own prompt instead of failing.
+private enum AudioCaptureTCC {
+    private typealias PreflightFunction = @convention(c) (CFString, CFDictionary?) -> Int
+    private typealias RequestFunction = @convention(c) (CFString, CFDictionary?, @escaping @convention(block) (Bool) -> Void) -> Void
+
+    nonisolated(unsafe) private static let handle = dlopen(
+        "/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW)
+
+    private static var service: CFString { "kTCCServiceAudioCapture" as CFString }
+
+    /// `0` granted, `1` denied, anything else not yet determined.
+    static func preflight() -> CaptureAuthorization.Status? {
+        guard let handle, let symbol = dlsym(handle, "TCCAccessPreflight") else { return nil }
+        switch unsafeBitCast(symbol, to: PreflightFunction.self)(service, nil) {
+        case 0: return .authorized
+        case 1: return .denied
+        default: return .notDetermined
+        }
+    }
+
+    static func request() async -> CaptureAuthorization.Status? {
+        guard let handle, let symbol = dlsym(handle, "TCCAccessRequest") else { return nil }
+        let request = unsafeBitCast(symbol, to: RequestFunction.self)
+        let granted: Bool = await withCheckedContinuation { continuation in
+            request(service, nil) { continuation.resume(returning: $0) }
+        }
+        return granted ? .authorized : .denied
     }
 }

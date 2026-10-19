@@ -26,10 +26,11 @@ public enum SessionState: Sendable, Equatable {
     /// A permission or pipeline error was surfaced. The transcript-so-far has
     /// been flushed/closed on a best-effort basis so partial work survives.
     case error(String)
-    /// The session self-discarded: it was started with a silent-discard window
-    /// (auto-started sessions), produced no finalized far-end ("them") speech
-    /// within it, and its transcript files were deleted. The associated value
-    /// is a short human-readable reason.
+    /// The session discarded itself: it was started with a silent-discard window
+    /// (auto-started sessions) and produced no finalized far-end ("them")
+    /// speech — either within that window or by the time it was stopped — so
+    /// its transcript files were deleted. The associated value is a short
+    /// human-readable reason.
     case discarded(String)
 }
 
@@ -152,6 +153,10 @@ public final class MeetingSession {
     @ObservationIgnored private var meterTask: Task<Void, Never>?
     @ObservationIgnored private var errorTask: Task<Void, Never>?
     @ObservationIgnored private var discardTask: Task<Void, Never>?
+    /// `true` for sessions started with a silent-discard window (auto-started).
+    /// Such a session is discarded whenever it ends without far-end speech —
+    /// by the watchdog, or at `stop()` when it ends before the window elapses.
+    @ObservationIgnored private var discardIfSilent = false
 
     /// FIFO barrier for finalized-event insertion/writing (SR-14/SR-16). Each
     /// finalized event captures the *current* value of this chain synchronously
@@ -285,12 +290,15 @@ public final class MeetingSession {
     /// - Parameter discardIfSilentAfter: when non-nil, a watchdog checks the
     ///   transcript after this many seconds; if no finalized far-end ("them")
     ///   event has arrived the session drains, deletes its files, and enters
-    ///   `.discarded`. Pass it only for auto-started sessions — a deliberate
-    ///   manual recording must never self-destruct.
+    ///   `.discarded`. A session stopped before the watchdog fires with no
+    ///   far-end speech is discarded the same way. Pass it only for
+    ///   auto-started sessions — a deliberate manual recording must never
+    ///   self-destruct.
     public func start(target: CaptureTarget, discardIfSilentAfter: TimeInterval? = nil) async {
         guard state == .idle || state == .selecting else { return }
 
         selectedTarget = target
+        discardIfSilent = discardIfSilentAfter != nil
         finalizedTranscript = []
         volatileLines = [:]
         meterLevels = [:]
@@ -732,7 +740,8 @@ public final class MeetingSession {
     /// 4. `engine.finish()` for **both** engines — drains their results
     /// 5. await both results tasks — every finalized event ingested + written
     /// 6. **only now** `writer.close()`
-    /// 7. `state = .saved(outputURL)`
+    /// 7. `state = .saved(outputURL)` — or `.discarded` when the session was
+    ///    started with a silent-discard window and no far-end speech arrived
     ///
     /// The writer is never closed before all finalized results are consumed —
     /// the key acceptance criterion for this phase.
@@ -740,7 +749,13 @@ public final class MeetingSession {
         guard state == .recording else { return }
         transition(to: .finalizing)
 
-        let (savedURL, _) = await drainAndClose()
+        let (savedURL, savedReadable) = await drainAndClose()
+
+        // Checked after the drain so trailing far-end results still count.
+        if discardIfSilent && !hasFarEndSpeech {
+            discardFiles(canonical: savedURL, readable: savedReadable)
+            return
+        }
 
         // 7: saved.
         if let savedURL {
@@ -820,6 +835,11 @@ public final class MeetingSession {
             return
         }
 
+        discardFiles(canonical: canonical, readable: readable)
+    }
+
+    /// Deletes both transcript files and enters `.discarded`.
+    private func discardFiles(canonical: URL?, readable: URL?) {
         if let canonical { try? FileManager.default.removeItem(at: canonical) }
         if let readable { try? FileManager.default.removeItem(at: readable) }
         outputURL = nil

@@ -284,10 +284,15 @@ final class AppModel {
         }
 
         // First-run permissions gate: refuse a doomed capture with a clear,
-        // actionable message instead of silently no-oping. The three permissions
+        // actionable message instead of silently no-oping. The permissions
         // fail independently; surface the most relevant blocker (Screen Recording
         // may need an app restart even after the user grants it).
         permissions.refresh()
+        // System Audio Recording arrived after the other grants: ask for it
+        // the first time a recording starts instead of refusing the meeting.
+        if permissions.systemAudioRecording == .unknown {
+            await permissions.requestSystemAudioRecording()
+        }
         if !permissions.isReadyToRecord {
             startupBlocker = permissions.primaryBlocker
             preparationError = startupBlocker?.guidance.message
@@ -397,8 +402,15 @@ final class AppModel {
         let appHints = appMatch?.app.titleHints ?? []
         let exclusions = appMatch?.app.nonMeetingTitlePrefixes ?? []
         let trailingStrips = appMatch?.app.titleTrailingStrips ?? []
+        let leadingStrips = appMatch?.app.titleLeadingStrips ?? []
         let windowTitle = await Task.detached(priority: .userInitiated) {
-            WindowTitleProbe.fullTitle(forBundleID: target.id, appHints: appHints, exclusions: exclusions, trailingStrips: trailingStrips)
+            WindowTitleProbe.fullTitle(
+                forBundleID: target.id,
+                appHints: appHints,
+                exclusions: exclusions,
+                trailingStrips: trailingStrips,
+                leadingStrips: leadingStrips
+            )
         }.value
         let ctx = MeetingContext(
             windowTitle: windowTitle,
@@ -563,8 +575,8 @@ final class AppModel {
                 guard !confirmApps.isEmpty else { return [] }
                 return WindowTitleProbe.presentHints(for: confirmApps, processStates: states)
             },
-            meetingTitleProvider: { match in
-                WindowTitleProbe.meetingWindowTitle(for: match)
+            meetingWindowProvider: { match in
+                WindowTitleProbe.meetingWindows(for: match)
             }
         )
         detector = det

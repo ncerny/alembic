@@ -101,11 +101,12 @@ EOF
 # newly-signed build. You'll be re-prompted (or re-toggle in System Settings) on
 # the next launch; with a stable cert the new grant then persists across rebuilds.
 reset_tcc() {
-    echo "==> Resetting TCC grants for ${BUNDLE_ID} (ScreenCapture, Microphone, SpeechRecognition)…"
+    echo "==> Resetting TCC grants for ${BUNDLE_ID} (ScreenCapture, AudioCapture, Microphone, SpeechRecognition)…"
     tccutil reset ScreenCapture "$BUNDLE_ID" 2>/dev/null || true
+    tccutil reset AudioCapture "$BUNDLE_ID" 2>/dev/null || true
     tccutil reset Microphone "$BUNDLE_ID" 2>/dev/null || true
     tccutil reset SpeechRecognition "$BUNDLE_ID" 2>/dev/null || true
-    echo "    Done. Relaunch Alembic and grant the three permissions again."
+    echo "    Done. Relaunch Alembic and grant the four permissions again."
 }
 
 OPEN_AFTER_BUILD=0

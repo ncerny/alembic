@@ -2,9 +2,9 @@ import Foundation
 import AppKit
 import AlembicKit
 
-/// `@MainActor @Observable` coordinator for the three independent permissions
-/// Alembic needs before it can record: Microphone, Speech Recognition, and
-/// Screen Recording.
+/// `@MainActor @Observable` coordinator for the four independent permissions
+/// Alembic needs before it can record: Microphone, Speech Recognition, Screen
+/// Recording, and System Audio Recording.
 ///
 /// ## Division of labour
 /// All *decisions* (raw status → ``PermissionState``, the requires-restart rule,
@@ -33,6 +33,7 @@ final class PermissionsModel {
     private(set) var microphone: PermissionState = .unknown
     private(set) var speechRecognition: PermissionState = .unknown
     private(set) var screenRecording: PermissionState = .unknown
+    private(set) var systemAudioRecording: PermissionState = .unknown
 
     /// Whether we've shown the Screen Recording system prompt this launch, used
     /// by the requires-restart detection rule.
@@ -43,11 +44,12 @@ final class PermissionsModel {
         PermissionSnapshot(
             microphone: microphone,
             speechRecognition: speechRecognition,
-            screenRecording: screenRecording
+            screenRecording: screenRecording,
+            systemAudioRecording: systemAudioRecording
         )
     }
 
-    /// `true` only when all three permissions are granted and effective.
+    /// `true` only when every permission is granted and effective.
     var isReadyToRecord: Bool { snapshot.isReadyToRecord }
 
     /// Permissions still needing a grant, in stable order, for the onboarding UI.
@@ -61,7 +63,7 @@ final class PermissionsModel {
 
     // MARK: - Refresh (no prompts)
 
-    /// Re-reads the current status of all three permissions **without** showing
+    /// Re-reads the current status of every permission **without** showing
     /// any system prompt. Safe to call on launch and whenever the menu opens.
     func refresh() {
         microphone = PermissionLogic.state(for: CapturePreflight.microphoneStatus().rawPermissionStatus)
@@ -70,6 +72,7 @@ final class PermissionsModel {
             effective: CapturePreflight.screenRecordingStatus() == .authorized,
             didRequest: didRequestScreenRecording
         )
+        systemAudioRecording = PermissionLogic.state(for: CapturePreflight.systemAudioRecordingStatus().rawPermissionStatus)
     }
 
     // MARK: - Requests (show the system prompt)
@@ -84,6 +87,12 @@ final class PermissionsModel {
         speechRecognition = .requesting
         let status = await CapturePreflight.requestSpeechRecognition()
         speechRecognition = PermissionLogic.state(for: status.rawPermissionStatus)
+    }
+
+    func requestSystemAudioRecording() async {
+        systemAudioRecording = .requesting
+        let status = await CapturePreflight.requestSystemAudioRecording()
+        systemAudioRecording = PermissionLogic.state(for: status.rawPermissionStatus)
     }
 
     /// Requests Screen Recording. The system prompt may grant immediately or — far
@@ -104,6 +113,7 @@ final class PermissionsModel {
     func requestAllMissing() async {
         if !microphone.isGranted { await requestMicrophone() }
         if !speechRecognition.isGranted { await requestSpeechRecognition() }
+        if !systemAudioRecording.isGranted { await requestSystemAudioRecording() }
         if !screenRecording.isGranted { requestScreenRecording() }
     }
 

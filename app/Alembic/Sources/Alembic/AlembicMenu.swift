@@ -156,6 +156,8 @@ struct AlembicMenu: View {
             Task { await model.permissions.requestSpeechRecognition() }
         case .screenRecording:
             model.permissions.requestScreenRecording()
+        case .systemAudioRecording:
+            Task { await model.permissions.requestSystemAudioRecording() }
         }
     }
 }

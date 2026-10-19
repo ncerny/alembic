@@ -123,6 +123,8 @@ struct AlembicCheck {
         checkDisclosurePolicy(s)
         checkFoundationOnlyTopLevelAudit(s)
         checkCandidatePIDs(s)
+        checkTapProcessMembership(s)
+        checkContiguousAudioTimeline(s)
         checkResolveMeetingWindowID(s)
         checkHasPositiveMeetingEvidence(s)
         checkVideoStreamPixelSize(s)
@@ -186,18 +188,19 @@ struct AlembicCheck {
                 .unknown, "not requested, not effective ⇒ unknown")
         }
 
-        s.check("PermissionSnapshot ready-to-record only when all three granted") { s in
-            let allGranted = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .granted)
+        s.check("PermissionSnapshot ready-to-record only when every permission is granted") { s in
+            let allGranted = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .granted, systemAudioRecording: .granted)
             s.expect(allGranted.isReadyToRecord, "all granted ⇒ ready")
             s.expect(allGranted.missing.isEmpty, "all granted ⇒ nothing missing")
             s.expect(allGranted.primaryBlocker == nil, "all granted ⇒ no blocker")
 
             for kind in PermissionKind.allCases {
-                var snap = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .granted)
+                var snap = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .granted, systemAudioRecording: .granted)
                 switch kind {
                 case .microphone: snap.microphone = .denied
                 case .speechRecognition: snap.speechRecognition = .denied
                 case .screenRecording: snap.screenRecording = .denied
+                case .systemAudioRecording: snap.systemAudioRecording = .denied
                 }
                 s.expect(!snap.isReadyToRecord, "\(kind.rawValue) denied ⇒ not ready")
                 s.expect(snap.missing == [kind], "\(kind.rawValue) denied ⇒ only it missing")
@@ -206,17 +209,21 @@ struct AlembicCheck {
 
         s.check("primaryBlocker picks a stable priority and detects restart") { s in
             // Mic wins priority over speech + screen when all are missing.
-            let allMissing = PermissionSnapshot(microphone: .denied, speechRecognition: .denied, screenRecording: .denied)
+            let allMissing = PermissionSnapshot(microphone: .denied, speechRecognition: .denied, screenRecording: .denied, systemAudioRecording: .denied)
             s.expectEqual(allMissing.primaryBlocker, .microphoneDenied, "mic has priority")
 
-            let speechOnly = PermissionSnapshot(microphone: .granted, speechRecognition: .denied, screenRecording: .granted)
+            let speechOnly = PermissionSnapshot(microphone: .granted, speechRecognition: .denied, screenRecording: .granted, systemAudioRecording: .granted)
             s.expectEqual(speechOnly.primaryBlocker, .speechRecognitionDenied, "speech blocker")
 
-            let screenDenied = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .denied)
+            let screenDenied = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .denied, systemAudioRecording: .granted)
             s.expectEqual(screenDenied.primaryBlocker, .screenRecordingDenied, "screen denied blocker")
 
-            let screenRestart = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .requiresRestart)
+            let screenRestart = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .requiresRestart, systemAudioRecording: .granted)
             s.expectEqual(screenRestart.primaryBlocker, .screenRecordingRequiresRestart, "screen restart blocker")
+
+            let systemAudioMissing = PermissionSnapshot(microphone: .granted, speechRecognition: .granted, screenRecording: .granted, systemAudioRecording: .unknown)
+            s.expect(!systemAudioMissing.isReadyToRecord, "system audio not yet granted ⇒ not ready")
+            s.expectEqual(systemAudioMissing.primaryBlocker, .systemAudioRecordingDenied, "system audio blocker")
         }
 
         s.check("PermissionKind exposes the correct System Settings deep-links") { s in
@@ -229,6 +236,10 @@ struct AlembicCheck {
             s.expectEqual(
                 PermissionKind.screenRecording.settingsURLString,
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture", "screen link")
+            s.expectEqual(
+                PermissionKind.systemAudioRecording.settingsURLString,
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+                "system audio shares the Screen & System Audio Recording pane")
         }
 
         s.check("StartupBlocker maps every failure to actionable guidance") { s in
@@ -245,6 +256,11 @@ struct AlembicCheck {
             let screen = StartupBlocker.screenRecordingDenied.guidance
             s.expect(screen.message.contains("Screen Recording"), "screen message")
             s.expectEqual(screen.settingsURLString, PermissionKind.screenRecording.settingsURLString, "screen link")
+
+            let systemAudio = StartupBlocker.systemAudioRecordingDenied.guidance
+            s.expect(systemAudio.message.contains("System Audio Recording"), "system audio message")
+            s.expectEqual(systemAudio.settingsURLString, PermissionKind.systemAudioRecording.settingsURLString, "system audio link")
+            s.expect(!systemAudio.suggestsRestart, "system audio does not suggest restart")
 
             // Restart blocker recommends Quit & Reopen.
             let restart = StartupBlocker.screenRecordingRequiresRestart.guidance
@@ -1062,6 +1078,62 @@ struct AlembicCheck {
             s.expectEqual(lines.count, 1, "the rescued far-end line was written")
         }
 
+        await s.checkAsync("MeetingSession discard: auto-started session stopped before the watchdog with no far-end speech is discarded") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let you = FakeTranscriptionEngine(script: [
+                TranscriptEvent(kind: .finalized, source: .you, start: 0, end: 1, text: "can you hear me?"),
+            ], emitOnStart: true)
+            let them = FakeTranscriptionEngine(script: [], emitOnStart: true)
+            let source = FakeAudioSource(script: [chunk(.you, 0)], finishAfterScript: false)
+            let make = makeWriterFactory(dir)
+
+            let session = await MainActor.run {
+                MeetingSession(
+                    audioSource: source,
+                    engineFactory: { tag, _ in tag == .you ? you : them },
+                    makeWriter: make)
+            }
+            await session.loadTargets()
+            await session.start(target: await session.availableTargets.first!, discardIfSilentAfter: 120)
+            await session.stop()
+
+            guard case .discarded = await session.state else {
+                s.expect(false, "early-stopped silent auto session reached .discarded"); return
+            }
+            s.expect(await session.outputURL == nil, "outputURL cleared after discard")
+            let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+            s.expect(leftovers.isEmpty, "transcript files deleted (found: \(leftovers))")
+        }
+
+        await s.checkAsync("MeetingSession discard: a manual session with no far-end speech is still saved at stop") { s in
+            let dir = try makeTempDir()
+            defer { try? FileManager.default.removeItem(at: dir) }
+
+            let you = FakeTranscriptionEngine(script: [
+                TranscriptEvent(kind: .finalized, source: .you, start: 0, end: 1, text: "dictating a note"),
+            ], emitOnStart: true)
+            let them = FakeTranscriptionEngine(script: [], emitOnStart: true)
+            let source = FakeAudioSource(script: [chunk(.you, 0)], finishAfterScript: false)
+            let make = makeWriterFactory(dir)
+
+            let session = await MainActor.run {
+                MeetingSession(
+                    audioSource: source,
+                    engineFactory: { tag, _ in tag == .you ? you : them },
+                    makeWriter: make)
+            }
+            await session.loadTargets()
+            await session.start(target: await session.availableTargets.first!)
+            await session.stop()
+
+            guard case let .saved(url) = await session.state else {
+                s.expect(false, "manual session saved"); return
+            }
+            s.expect(FileManager.default.fileExists(atPath: url.path), "manual transcript kept")
+        }
+
         // --- Phase 3: FakeAttributionProvider end-to-end wiring (§2.1–§2.6) ---
 
         await s.checkAsync("MeetingSession + FakeAttributionProvider: attributes finalized .them end-to-end; .you/volatile untouched") { s in
@@ -1794,6 +1866,22 @@ struct AlembicCheck {
                 [2, 3],
                 "ragged channels clamp to shortest"
             )
+        }
+
+        s.check("AudioMath.downmixBuffersToMono handles both process-tap buffer layouts") { s in
+            // One interleaved stereo buffer (the observed tap format).
+            s.expectEqual(
+                AudioMath.downmixBuffersToMono([(samples: [1, 3, 2, 4], channelCount: 2)]),
+                [2, 3],
+                "single interleaved stereo buffer"
+            )
+            // Two single-channel (non-interleaved) buffers give the same mono.
+            s.expectEqual(
+                AudioMath.downmixBuffersToMono([(samples: [1, 2], channelCount: 1), (samples: [3, 4], channelCount: 1)]),
+                [2, 3],
+                "two non-interleaved channel buffers"
+            )
+            s.expectEqual(AudioMath.downmixBuffersToMono([(samples: [], channelCount: 2)]), [], "empty buffer list ⇒ no samples")
         }
 
         s.check("MeterLevel.measuring matches AudioMath") { s in
@@ -3835,10 +3923,10 @@ struct AlembicCheck {
                                    isRunningInput: false, isRunningOutput: true)]
             }
 
-            // Hub-only windows: meetingTitleProvider returns nil → signal none.
+            // Hub-only windows: no meeting window on screen → signal none.
             let noWindow = MeetingDetector(
                 snapshotProvider: { [] },
-                meetingTitleProvider: { _ in nil },
+                meetingWindowProvider: { _ in .none },
                 policy: MeetingDetectionPolicy(startDebounce: 0, broadcastStartDebounce: 30, endDebounce: 0)
             )
             for t in stride(from: 0.0, through: 60.0, by: 3.0) {
@@ -3849,7 +3937,7 @@ struct AlembicCheck {
             // Meeting window exists: confirms only after the broadcast debounce.
             let townHall = MeetingDetector(
                 snapshotProvider: { [] },
-                meetingTitleProvider: { _ in "Digital Town Hall" },
+                meetingWindowProvider: { _ in MeetingWindowSnapshot(frontmost: "Digital Town Hall") },
                 policy: MeetingDetectionPolicy(startDebounce: 0, broadcastStartDebounce: 30, endDebounce: 0)
             )
             s.expect(townHall.tick(snapshot: outputOnlyTeams(), now: 0) == nil, "t=0: confirming")
@@ -3874,7 +3962,7 @@ struct AlembicCheck {
             let box = TitleBox()
             let det = MeetingDetector(
                 snapshotProvider: { [] },
-                meetingTitleProvider: { _ in box.title },
+                meetingWindowProvider: { _ in MeetingWindowSnapshot(frontmost: box.title) },
                 titleChangeStability: 6,
                 policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
             )
@@ -3901,6 +3989,50 @@ struct AlembicCheck {
             // Title disappearing (window minimized) never splits or ends.
             box.title = nil
             s.expect(det.tick(snapshot: teams(), now: 25) == nil, "nil title → no effect")
+        }
+
+        // --- 10. Presence-based split: z-order noise never splits a live meeting ---
+        s.check("MeetingDetector tick: another window in front never splits while the meeting window still exists") { s in
+            final class WindowsBox: @unchecked Sendable {
+                private let lock = NSLock()
+                private var value = MeetingWindowSnapshot(frontmost: "Lodestar Standup")
+                var snapshot: MeetingWindowSnapshot {
+                    get { lock.withLock { value } }
+                    set { lock.withLock { value = newValue } }
+                }
+            }
+            let box = WindowsBox()
+            let det = MeetingDetector(
+                snapshotProvider: { [] },
+                meetingWindowProvider: { _ in box.snapshot },
+                titleChangeStability: 6,
+                policy: MeetingDetectionPolicy(startDebounce: 0, endDebounce: 0)
+            )
+            _ = det.tick(snapshot: teams(), now: 0)
+            s.expect(det.tick(snapshot: teams(), now: 0)?.flatMap { $0 } != nil, "meeting active")
+
+            // A different, uncatalogued Teams window sits in front for a
+            // minute while the call window stays open behind it.
+            box.snapshot = MeetingWindowSnapshot(frontmost: "Longietti, Samuel (Contractor)", present: ["Lodestar Standup"])
+            for t in stride(from: 1.0, through: 60.0, by: 3.0) {
+                s.expect(det.tick(snapshot: teams(), now: t) == nil, "call window still present → no split (t=\(t))")
+            }
+
+            // Call window minimized / on another Space: off screen but still exists.
+            box.snapshot = MeetingWindowSnapshot(
+                frontmost: "Longietti, Samuel (Contractor)",
+                present: ["Lodestar Standup", "Longietti, Samuel (Contractor)"])
+            for t in stride(from: 61.0, through: 90.0, by: 3.0) {
+                s.expect(det.tick(snapshot: teams(), now: t) == nil, "minimized call window still present → no split (t=\(t))")
+            }
+
+            // Call window closed, next meeting's window frontmost: split after stability.
+            box.snapshot = MeetingWindowSnapshot(frontmost: "Next Meeting")
+            s.expect(det.tick(snapshot: teams(), now: 100) == nil, "new title pending")
+            guard let split = det.tick(snapshot: teams(), now: 107), let d = split else {
+                s.expect(false, "meeting window gone + stable new title → split"); return
+            }
+            s.expectEqual(d.app.displayName, "Microsoft Teams", "split re-detects the same app")
         }
     }
 
@@ -4233,6 +4365,68 @@ struct AlembicCheck {
             let prefixes = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app.nonMeetingTitlePrefixes ?? []
             s.expect(prefixes.contains("Meeting compact view"), "Meeting compact view in Teams exclusions")
         }
+
+        // Window titles observed on 2026-10-16 that split one Teams call into
+        // many transcript files.
+        s.check("strict title: observed Teams chrome (Window, Sharing Indicator, webview URL) is never a meeting window") { s in
+            guard let app = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app else {
+                s.expect(false, "Teams catalog entry"); return
+            }
+            for chrome in ["Window", "Sharing Indicator", "teams.microsoft.com/v2/"] {
+                let result = MeetingContext.bestTitle(
+                    from: [chrome], exclusions: app.nonMeetingTitlePrefixes,
+                    preferFrontmost: true, exclusionFallback: false)
+                s.expect(result == nil, "\"\(chrome)\" alone ⇒ no meeting window")
+            }
+            let raw = MeetingContext.bestTitle(
+                from: ["Sharing Indicator", "Window", "Longietti, Samuel (Contractor) | Microsoft Teams"],
+                exclusions: app.nonMeetingTitlePrefixes, preferFrontmost: true, exclusionFallback: false)
+            s.expectEqual(raw, "Longietti, Samuel (Contractor) | Microsoft Teams",
+                          "chrome in front is skipped; the call window behind it is the meeting")
+        }
+
+        s.check("pre-join lobby and joined meeting window normalize to the same meeting name") { s in
+            guard let app = MeetingAppCatalog.match(bundleID: "com.microsoft.teams2")?.app else {
+                s.expect(false, "Teams catalog entry"); return
+            }
+            let names = MeetingContext.normalizedMeetingTitles(
+                from: [
+                    "Meeting join | Lodestar Daily Standup (Europe TZ) | Microsoft Teams",
+                    "Lodestar Daily Standup (Europe TZ) | Microsoft Teams",
+                ],
+                exclusions: app.nonMeetingTitlePrefixes,
+                leadingStrips: app.titleLeadingStrips,
+                trailingStrips: app.titleTrailingStrips)
+            s.expectEqual(names, ["Lodestar Daily Standup (Europe TZ)"], "lobby and joined window are one meeting")
+        }
+
+        s.check("normalizedMeetingTitles: drops excluded and URL chrome, keeps order, de-duplicates") { s in
+            let names = MeetingContext.normalizedMeetingTitles(
+                from: [
+                    "Chat | Alice | Microsoft Teams", "Window", "B | Microsoft Teams",
+                    "teams.microsoft.com/v2/", "A | Microsoft Teams", "B | Microsoft Teams",
+                ],
+                exclusions: ["Chat", "Window"],
+                leadingStrips: [],
+                trailingStrips: [" | Microsoft Teams"])
+            s.expectEqual(names, ["B", "A"], "only real meeting names, first-seen order, no duplicates")
+        }
+
+        s.check("isURLLikeTitle: URL/host-path chrome matches; meeting subjects and dotted words do not") { s in
+            for url in ["teams.microsoft.com/v2/", "teams.microsoft.com/v2/ | Microsoft Teams", "zoom.us/j/123", "about://blank"] {
+                s.expect(MeetingContext.isURLLikeTitle(url), "\"\(url)\" is URL-like")
+            }
+            for name in ["Lodestar Daily Standup (Europe TZ)", "Q3 review / planning", "v2.0", "Ops.Sync", "+1 913-712-6167", "Window"] {
+                s.expect(!MeetingContext.isURLLikeTitle(name), "\"\(name)\" is not URL-like")
+            }
+        }
+
+        s.check("applyLeadingStrips: strips only a matching prefix and never empties a title") { s in
+            let strips = ["Meeting join | "]
+            s.expectEqual(MeetingContext.applyLeadingStrips(to: "Meeting join | Standup", strips: strips), "Standup", "prefix stripped")
+            s.expectEqual(MeetingContext.applyLeadingStrips(to: "Standup", strips: strips), "Standup", "no prefix ⇒ unchanged")
+            s.expectEqual(MeetingContext.applyLeadingStrips(to: "Meeting join | ", strips: strips), "Meeting join | ", "would-be-empty ⇒ unchanged")
+        }
     }
 
     // MARK: - Foundation-only top-level AlembicKit audit
@@ -4336,6 +4530,105 @@ struct AlembicCheck {
     }
 
     // MARK: - Phase 4: ScreenCaptureKitSource gated video-frame stream (pure seams)
+
+    static func checkContiguousAudioTimeline(_ s: CheckSuite) {
+        let rate = 100.0  // small rate keeps sample arrays tiny
+        func samples(_ seconds: Double) -> [Float] { [Float](repeating: 0.5, count: Int(seconds * rate)) }
+
+        s.check("ContiguousAudioTimeline: far-end audio that starts 60 s in is stamped at 60 s, not 0") { s in
+            var timeline = ContiguousAudioTimeline()
+            var emitted = 0.0
+            // Heartbeat pads silence while the meeting app has produced no audio.
+            for tick in 1...240 {
+                if let silence = timeline.fillSilence(through: Double(tick) * 0.25, sampleRate: rate) {
+                    s.expect(silence.isSilence, "heartbeat segments are silence")
+                    emitted += Double(silence.samples.count) / rate
+                }
+            }
+            let segments = timeline.place(samples(1), sampleRate: rate, at: 60.05)
+            guard let audio = segments.last else { s.expect(false, "audio emitted"); return }
+            s.expect(!audio.isSilence, "last segment is the captured audio")
+            s.expect(abs(audio.start - 60.05) < 0.011, "audio placed at its capture time (got \(audio.start))")
+            emitted += segments.reduce(0) { $0 + Double($1.samples.count) / rate }
+            s.expect(abs(emitted - timeline.cursor) < 1e-9, "emitted duration equals the timeline cursor (contiguous)")
+        }
+
+        s.check("ContiguousAudioTimeline: audio overlapping padded silence is trimmed, jitter is absorbed") { s in
+            var timeline = ContiguousAudioTimeline()
+            _ = timeline.fillSilence(through: 1.0, sampleRate: rate)
+            let late = timeline.place(samples(0.5), sampleRate: rate, at: 0.9)
+            s.expectEqual(late.count, 1, "no gap fill for an overlapping chunk")
+            s.expectEqual(late.first?.samples.count, 40, "the 0.1 s already covered is trimmed")
+            s.expectEqual(late.first?.start, 1.0, "trimmed audio starts at the cursor")
+
+            let jittered = timeline.place(samples(0.5), sampleRate: rate, at: 1.41)
+            s.expectEqual(jittered.count, 1, "10 ms jitter is not padded")
+            s.expect(abs((jittered.first?.start ?? -1) - 1.4) < 1e-9, "jittered audio stays contiguous")
+
+            let covered = timeline.place(samples(0.2), sampleRate: rate, at: 1.0)
+            s.expect(covered.isEmpty, "audio entirely before the cursor emits nothing")
+        }
+
+        s.check("ContiguousAudioTimeline: a sleep-length gap is skipped, not padded, and the stream stays contiguous") { s in
+            var timeline = ContiguousAudioTimeline(maxGap: 10)
+            _ = timeline.place(samples(1), sampleRate: rate, at: 0)
+            s.expect(timeline.fillSilence(through: 3600, sampleRate: rate) == nil, "an hour-long stall pads nothing")
+            let resumed = timeline.place(samples(1), sampleRate: rate, at: 3600.01)
+            s.expectEqual(resumed.count, 1, "no hour of silence before resumed audio")
+            s.expectEqual(resumed.first?.start, 1.0, "resumed audio continues at the cursor")
+            s.expect(timeline.cursor < 3, "timeline compressed across the gap (cursor \(timeline.cursor))")
+        }
+    }
+
+    static func checkTapProcessMembership(_ s: CheckSuite) {
+        let ownPID: Int32 = 999
+        func process(_ objectID: UInt32, pid: Int32, bundleID: String, responsible: Int32? = nil) -> TapProcessInfo {
+            TapProcessInfo(objectID: objectID, pid: pid, bundleID: bundleID, responsiblePID: responsible ?? pid)
+        }
+
+        s.check("tapProcessObjectIDs: Teams parent + helper processes are tapped; other apps and Alembic are not") { s in
+            let processes = [
+                process(10, pid: 100, bundleID: "com.microsoft.teams2"),
+                process(11, pid: 101, bundleID: "com.microsoft.teams2.modulehost"),
+                process(12, pid: 102, bundleID: "com.microsoft.teams2x"),        // textual prefix only
+                process(13, pid: 103, bundleID: "com.tinyspeck.slackmacgap"),    // a chime from another app
+                process(14, pid: ownPID, bundleID: "com.alembic.app"),
+            ]
+            let ids = ProcessTapCapture.tapProcessObjectIDs(
+                canonicalBundlePrefix: "com.microsoft.teams2", familyPIDs: [100], ownPID: ownPID, processes: processes)
+            s.expectEqual(ids, [10, 11], "only the Teams family is tapped")
+        }
+
+        s.check("tapProcessObjectIDs: a helper the browser is responsible for is tapped (WebKit audio)") { s in
+            let processes = [
+                process(20, pid: 200, bundleID: "com.apple.Safari"),
+                process(21, pid: 201, bundleID: "com.apple.WebKit.GPU", responsible: 200),
+                process(22, pid: 202, bundleID: "com.apple.WebKit.GPU", responsible: 300), // another app's WebKit
+            ]
+            let ids = ProcessTapCapture.tapProcessObjectIDs(
+                canonicalBundlePrefix: "com.apple.Safari", familyPIDs: [200], ownPID: ownPID, processes: processes)
+            s.expectEqual(ids, [20, 21], "Safari and the GPU helper it owns, not another app's helper")
+        }
+
+        s.check("tapProcessObjectIDs: a pid: target taps that PID and what it is responsible for, sorted and unique") { s in
+            let processes = [
+                process(31, pid: 301, bundleID: "", responsible: 300),
+                process(30, pid: 300, bundleID: ""),
+                process(30, pid: 300, bundleID: ""),
+                process(32, pid: 302, bundleID: ""),
+            ]
+            let ids = ProcessTapCapture.tapProcessObjectIDs(
+                canonicalBundlePrefix: "pid:300", familyPIDs: [300], ownPID: ownPID, processes: processes)
+            s.expectEqual(ids, [30, 31], "target PID + its helper, de-duplicated and ordered")
+        }
+
+        s.check("tapProcessObjectIDs: an app with no audio processes yet yields an empty (re-targetable) tap") { s in
+            let ids = ProcessTapCapture.tapProcessObjectIDs(
+                canonicalBundlePrefix: "us.zoom.xos", familyPIDs: [400], ownPID: ownPID,
+                processes: [process(40, pid: 401, bundleID: "com.other.app")])
+            s.expect(ids.isEmpty, "no family processes ⇒ empty process list")
+        }
+    }
 
     static func checkCandidatePIDs(_ s: CheckSuite) {
         s.check("candidatePIDs: returns parent PID plus dot-delimited child bundle-ID PIDs") { s in
@@ -4777,20 +5070,16 @@ struct AlembicCheck {
             s.expect(noWindow.video == nil, "audioOnly + no window ⇒ no video plan")
             s.expect(withWindow.video == nil, "audioOnly + resolved window ⇒ still no video plan — the off state cannot be influenced by window resolution")
             s.expectEqual(noWindow.audio, withWindow.audio, "audio plan identical regardless of window resolution")
-            s.expectEqual(noWindow.audio.width, 2, "2x2 audio plane")
-            s.expectEqual(noWindow.audio.height, 2, "2x2 audio plane")
-            s.expect(noWindow.audio.capturesAudio, "audio plan captures audio")
+            // Notification regression lock: an audio SCStream marks the screen
+            // as shared and silences notifications for the whole meeting.
+            s.expectEqual(noWindow.audio.mechanism, .coreAudioProcessTap, "meeting audio is a Core Audio process tap, never an SCStream")
+            s.expect(noWindow.audio.tapsAppProcessFamily, "tap covers the app's process family")
+            s.expect(noWindow.audio.excludesCurrentProcessAudio, "Alembic's own audio is excluded")
+            s.expect(noWindow.audio.unmuted, "the user still hears the call")
+            s.expect(noWindow.audio.privateTap, "tap is private to Alembic")
+            s.expect(!noWindow.audio.aggregateHasHardwareSubDevice, "tap-only aggregate survives output-device changes")
+            s.expect(noWindow.audio.followsProcessChanges, "tap re-targets as the family's processes change")
             s.expectEqual(noWindow.audio.sampleHandlerQoS, .userInitiated, "audio QoS unchanged")
-            // HIGH-1 regression lock: the audio display/filter must always be
-            // scoped to the single matched app, never the wider PID family
-            // video/meeting-window resolution uses.
-            s.expectEqual(noWindow.audio.displayPIDScope, .singleMatchedApp, "audio display selection scoped to the single matched app, not the PID family")
-            s.expect(noWindow.audio.filterIncludesSingleMatchedAppOnly, "audio filter's `including:` list is exactly the single matched app")
-            s.expect(noWindow.audio.excludesCurrentProcessAudio, "audio filter excludes Alembic's own process audio")
-            s.expectEqual(noWindow.audio.channelCount, 2, "stereo audio")
-            s.expectEqual(noWindow.audio.sampleRate, 48_000, "48kHz audio")
-            s.expectEqual(noWindow.audio.minimumFrameIntervalFPS, 1, "1fps video-plane throttle on the audio stream")
-            s.expect(!noWindow.audio.showsCursor, "audio stream never shows the cursor")
         }
 
         s.check("ScreenCaptureConfigurationPlan: .audioPlusAttribution with no resolved window still produces video == nil") { s in
@@ -4820,36 +5109,33 @@ struct AlembicCheck {
     /// `checkFoundationOnlyTopLevelAudit`'s precedent of asserting properties
     /// of the *source tree* rather than of runtime behavior) — supplemental
     /// to `checkScreenCaptureConfigurationPlan` above, not a substitute for
-    /// it: proves the audio-stream construction block in
-    /// `ScreenCaptureKitSource.swift` cannot branch on `mode`, that the
-    /// audio-plane constants and QoS are unconditionally reachable, that the
-    /// video-only output/`startCapture()` calls are reachable only from the
-    /// `.audioPlusAttribution` branch, and that the pixel-buffer lock's
-    /// return code is checked before use.
+    /// it: proves meeting audio is a process tap (never an audio `SCStream`),
+    /// that its construction cannot branch on `mode`, that `ProcessTapCapture`
+    /// matches the `AudioPlan` seam, that the video-only output/`startCapture()`
+    /// calls are reachable only from the `.audioPlusAttribution` branch, and
+    /// that the pixel-buffer lock's return code is checked before use.
     static func checkScreenCaptureAudioIdentitySourceAudit(_ s: CheckSuite) {
-        s.check("ScreenCaptureKitSource.swift: audio construction never branches on `mode`; video gated on .audioPlusAttribution") { s in
+        s.check("ScreenCaptureKitSource.swift: meeting audio is a mode-independent process tap; video gated on .audioPlusAttribution") { s in
             let path = "Sources/AlembicKit/Platform/macOS/ScreenCaptureKitSource.swift"
             guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
                 s.expect(false, "could not read \(path)")
                 return
             }
 
+            // Notification regression lock: no audio SCStream may come back.
+            s.expect(!content.contains("capturesAudio = true"), "no SCStream configuration captures audio")
+            s.expect(!content.contains("type: .audio"), "no SCStream audio output is registered")
+
             guard
-                let configRange = content.range(of: "let config = SCStreamConfiguration()"),
-                let selfStreamRange = content.range(of: "self.stream = stream")
+                let tapRange = content.range(of: "let tap = ProcessTapCapture(targetID: target.id"),
+                let tapStoredRange = content.range(of: "self.tap = tap")
             else {
-                s.expect(false, "could not locate the audio stream construction block markers")
+                s.expect(false, "could not locate the meeting-audio tap construction markers")
                 return
             }
-            let audioBlock = content[configRange.lowerBound..<selfStreamRange.upperBound]
-            s.expect(!audioBlock.contains("mode"), "audio stream construction block does not reference `mode` anywhere")
-
-            s.expect(audioBlock.contains("config.width = 2"), "audio plane width constant present and reachable, unconditionally")
-            s.expect(audioBlock.contains("config.height = 2"), "audio plane height constant present and reachable, unconditionally")
-            s.expect(audioBlock.contains("qos: .userInitiated"), "audio output QoS present in the unconditional block")
-
-            let useInitiatedCount = content.components(separatedBy: "qos: .userInitiated").count - 1
-            s.expectEqual(useInitiatedCount, 1, "audio's .userInitiated QoS appears exactly once in the file")
+            let audioBlock = content[tapRange.lowerBound..<tapStoredRange.upperBound]
+            s.expect(!audioBlock.contains("mode"), "audio tap construction block does not reference `mode` anywhere")
+            s.expect(audioBlock.contains("errors: errorContinuation"), "the tap reports fatal failures on the fatal errors stream")
 
             guard
                 let modeSwitchRange = content.range(of: "switch mode {"),
@@ -4861,53 +5147,50 @@ struct AlembicCheck {
             }
             s.expect(videoAddRange.lowerBound > modeSwitchRange.lowerBound, "video .screen output registration occurs only after the mode switch")
             s.expect(videoStartRange.lowerBound > modeSwitchRange.lowerBound, "videoStream.startCapture() occurs only after the mode switch")
+            s.expect(tapRange.lowerBound < modeSwitchRange.lowerBound, "the audio tap starts before the video mode switch")
 
             s.expect(
                 content.contains("CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly) == kCVReturnSuccess"),
                 "validatedPixelCopy checks the CVPixelBufferLockBaseAddress return code before reading buffer state")
 
-            // HIGH-1 regression lock: the audio display selection must use the
-            // single matched app's PID (`appPID`/`app.processID`), never the
-            // wider `pids` family the meeting-window resolver above it uses.
-            guard let appWindowsRange = content.range(of: "let appWindows = content.windows.filter { $0.owningApplication?.processID == appPID }") else {
-                s.expect(false, "audio display's appWindows filter must scope to appPID (single matched app), not the pids family — literal line not found")
-                return
-            }
-            s.expect(!content.contains("let appWindows = content.windows.filter { pids.contains"), "audio display selection must never be scoped to the pids family")
-
             // MEDIUM-1 regression lock: microphone capture must start before
             // any video-stream work, so a slow/blocked video startup can
             // never delay it.
-            guard
-                let startMicRange = content.range(of: "try startMic(clock: clock)"),
-                let modeSwitchRange2 = content.range(of: "switch mode {")
-            else {
-                s.expect(false, "could not locate startMic call / mode switch markers")
+            guard let startMicRange = content.range(of: "try startMic(clock: clock)") else {
+                s.expect(false, "could not locate startMic call marker")
                 return
             }
-            s.expect(startMicRange.lowerBound < modeSwitchRange2.lowerBound, "startMic(clock:) is called before the video-stream mode switch, never after")
-            s.expect(appWindowsRange.lowerBound < modeSwitchRange2.lowerBound, "audio display selection (appPID-scoped) resolves before the video mode switch")
+            s.expect(startMicRange.lowerBound < modeSwitchRange.lowerBound, "startMic(clock:) is called before the video-stream mode switch, never after")
+            // Both sides must sit on a contiguous timeline from session time 0,
+            // or "you" lines run early relative to "them" by the startup delay.
+            s.expect(content.contains("timeline.place(block.monoSamples, sampleRate: block.sampleRate, at: start)"),
+                     "mic chunks are placed on a ContiguousAudioTimeline, like the meeting-audio tap")
             s.expect(content.contains("videoStartupTask = Task"),
                      "video startup runs in an independent task so audio consumption can begin immediately")
             s.expect(content.contains("startVideoStream(VideoStreamBox(videoStream), timeout: .seconds(3))"),
                      "video startup has a bounded three-second wait and an owned non-Sendable stream box")
 
-            // MEDIUM-2: the audio-stream literal constants this source audit
-            // already pins (channelCount/sampleRate/excludesCurrentProcessAudio/
-            // minimumFrameInterval/showsCursor) must match
-            // `ScreenCaptureConfigurationPlan`'s fixed `AudioPlan` values, so
-            // the seam and production cannot silently drift apart.
-            s.expect(audioBlock.contains("config.channelCount = 2"), "production audio channelCount matches AudioPlan.channelCount")
-            s.expect(audioBlock.contains("config.sampleRate = 48_000"), "production audio sampleRate matches AudioPlan.sampleRate")
-            s.expect(audioBlock.contains("config.excludesCurrentProcessAudio = true"), "production audio excludesCurrentProcessAudio matches AudioPlan")
-            s.expect(audioBlock.contains("config.minimumFrameInterval = CMTime(value: 1, timescale: 1)"), "production audio minimumFrameInterval matches AudioPlan (1fps)")
-            s.expect(audioBlock.contains("config.showsCursor = false"), "production audio showsCursor matches AudioPlan")
-            s.expect(audioBlock.contains("SCContentFilter(display: display, including: [app]"), "audio filter's including: list is exactly [app] — the single matched app, matching AudioPlan.filterIncludesSingleMatchedAppOnly")
-
             // HIGH-2 regression lock: video window resolution must be gated on
             // positive meeting-window evidence, not exclusion-list survival
             // alone.
             s.expect(content.contains("hasPositiveMeetingEvidence"), "resolveMeetingWindowID consults hasPositiveMeetingEvidence before returning a windowID")
+        }
+
+        s.check("ProcessTapCapture.swift: tap construction matches the AudioPlan seam") { s in
+            let path = "Sources/AlembicKit/Platform/macOS/ProcessTapCapture.swift"
+            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+                s.expect(false, "could not read \(path)")
+                return
+            }
+            s.expect(content.contains("description.muteBehavior = .unmuted"), "tap is unmuted (AudioPlan.unmuted)")
+            s.expect(content.contains("description.isPrivate = true"), "tap is private (AudioPlan.privateTap)")
+            s.expect(content.contains("kAudioAggregateDeviceTapListKey"), "aggregate device carries the tap")
+            s.expect(!content.contains("kAudioAggregateDeviceSubDeviceListKey") && !content.contains("kAudioAggregateDeviceMainSubDeviceKey"),
+                     "aggregate has no hardware sub-device (AudioPlan.aggregateHasHardwareSubDevice == false)")
+            s.expect(content.contains("kAudioHardwarePropertyProcessObjectList"), "tap follows process-list changes (AudioPlan.followsProcessChanges)")
+            s.expect(content.contains("guard process.pid != ownPID"), "Alembic's own process is never tapped (AudioPlan.excludesCurrentProcessAudio)")
+            s.expect(content.contains("qos: .userInitiated"), "IOProc queue QoS matches AudioPlan.sampleHandlerQoS")
+            s.expect(content.contains("source: .them"), "tap chunks are tagged .them")
         }
     }
 
@@ -4979,17 +5262,15 @@ struct AlembicCheck {
             s.expectEqual(nonFatalYieldCount, 5, "all five video-only failure sites yield onto the non-fatal diagnostics sink")
 
             // `errorContinuation.yield` must never appear at all in the file —
-            // the only fatal producer is `StreamAudioOutput.errors.yield`
-            // (fed by `errorContinuation` only through its `init`, at the
-            // audio-only construction call site below).
-            s.expect(!content.contains("errorContinuation.yield"), "errorContinuation is never yielded onto directly — only StreamAudioOutput.errors.yield (audio-fatal) exists")
+            // the only fatal producer is the meeting-audio `ProcessTapCapture`
+            // (fed `errorContinuation` only at its audio-only start call).
+            s.expect(!content.contains("errorContinuation.yield"), "errorContinuation is never yielded onto directly — only the audio tap (audio-fatal) reports on it")
 
-            // The audio `StreamAudioOutput` init call is the only place
-            // `errorContinuation` is threaded into a delegate object — proves
-            // the video `StreamFrameOutput` init call (below) cannot also
-            // receive it.
+            // The audio tap's start call is the only place `errorContinuation`
+            // is threaded into a capture object — proves the video
+            // `StreamFrameOutput` init call (below) cannot also receive it.
             let errorContinuationInitSites = content.components(separatedBy: "errors: errorContinuation").count - 1
-            s.expectEqual(errorContinuationInitSites, 1, "errorContinuation is threaded into exactly one delegate init call — StreamAudioOutput's (audio, fatal)")
+            s.expectEqual(errorContinuationInitSites, 1, "errorContinuation is threaded into exactly one capture object — the audio tap (audio, fatal)")
             s.expect(content.contains("diagnostics: attributionDiagnosticsContinuation"), "StreamFrameOutput's init call is threaded attributionDiagnosticsContinuation, not errorContinuation")
 
             // `stop()` must terminate both sinks so a consumer of either

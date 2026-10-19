@@ -57,7 +57,9 @@ Single SwiftPM package at `app/Alembic/Package.swift`, four targets:
 - **`Sources/AlembicKit/TranscriptWriter.swift`** — Crash-safe JSONL writer. Flushes after every finalized segment.
 - **`Sources/AlembicKit/VocabularyStore.swift`** — Loads vocabulary hints from three sources (inline > file > folder), deduplicates, enforces ~500-term Apple limit, and expands "Last, First" names to natural order. `recommendedMaxTerms = 500`.
 - **`Sources/AlembicKit/Platform/macOS/SpeechAnalyzerEngine.swift`** — macOS 26 `SpeechTranscriber` + `SpeechAnalyzer` actor. Accepts `contextualStrings: [String]` at init; calls `analyzer.setContext(_:)` before starting analysis.
-- **`Sources/AlembicKit/Platform/macOS/ScreenCaptureKitSource.swift`** — Per-app audio capture via ScreenCaptureKit.
+- **`Sources/AlembicKit/Platform/macOS/ScreenCaptureKitSource.swift`** — The macOS `AudioSource`: starts `ProcessTapCapture` ("them") + the `AVAudioEngine` mic ("you"). Uses ScreenCaptureKit only for target enumeration and the opt-in attribution video stream.
+- **`Sources/AlembicKit/Platform/macOS/ProcessTapCapture.swift`** — Meeting audio via a Core Audio process tap (private, unmuted, tap-only aggregate device) on the app's process family; re-targets as processes come and go. **Never capture audio with an `SCStream`**: an active stream marks the screen as shared and silences notifications for the whole meeting.
+- **`Sources/AlembicKit/ContiguousAudioTimeline.swift`** — Keeps the tap and mic streams gap-free from session time 0 (silence heartbeat, gap fill, overlap trim), because `SpeechAnalyzer` times results by audio fed; without it "you" and "them" timestamps drift apart.
 - **`Sources/AlembicKit/Platform/macOS/SpeechAssetManager.swift`** — Downloads on-device speech model assets from Apple (one-time; no audio is sent).
 - **`Sources/AlembicKit/TranscriptionEngine.swift`** — Protocol. `contextualStrings` is **not** on the protocol — it is `SpeechAnalyzerEngine`-specific.
 - **`Sources/AlembicCheck/AlembicCheck.swift`** — All check functions + `runAllChecks`. Add new functions here.
@@ -65,7 +67,7 @@ Single SwiftPM package at `app/Alembic/Package.swift`, four targets:
 ### Audio pipeline
 
 ```
-ScreenCaptureKitSource ("them")  ──┐
+ProcessTapCapture ("them")       ──┐
                                    ├──▶  MeetingSession  ──▶  SpeechAnalyzerEngine  ──▶  TranscriptWriter
 AVAudioEngine mic ("you")        ──┘      (per-source)        (per-source, macOS 26)     (JSONL + .md)
 ```
@@ -116,6 +118,7 @@ Each JSONL line is a `FinalizedSegmentDTO`: `schemaVersion`, `start`, `end`,
 - `bash build.sh --make-cert` creates a stable self-signed identity; grants survive rebuilds.
 - After switching from ad-hoc to a stable identity, run `bash build.sh --reset-tcc` once to clear stale grants.
 - Screen Recording requires an app relaunch after the initial grant (`CGPreflightScreenCaptureAccess()` only returns `true` after relaunch). Alembic surfaces this as `PermissionState.requiresRestart`.
+- System Audio Recording (`kTCCServiceAudioCapture`, `NSAudioCaptureUsageDescription`) has no public status API; `CapturePreflight` uses the TCC SPI (`dlsym`) and requests explicitly — the implicit prompt Core Audio raises at tap start is easily missed. Process taps can't be exercised from `swift run` (the terminal lacks the usage string); test them in the signed app bundle.
 
 ## Privacy invariant
 
