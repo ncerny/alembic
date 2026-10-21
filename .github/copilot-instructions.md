@@ -115,7 +115,8 @@ Each JSONL line is a `FinalizedSegmentDTO`: `schemaVersion`, `start`, `end`,
 ## CI & releases
 
 - `.github/workflows/ci.yml` — PRs and pushes to `main` on `macos-26`: `swift run AlembicCheck`, privacy grep, `bash build.sh`.
-- `.github/workflows/release.yml` — release-please (Conventional Commits drive semver: `fix` → patch, `feat` → minor, breaking → minor pre-1.0). Merging the release PR tags `vX.Y.Z`; the build job signs with "Alembic Self-Signed" from the `ALEMBIC_SIGNING_P12_*` secrets and attaches `Alembic-X.Y.Z-macos-arm64.zip` + `.sha256`.
+- `.github/workflows/release.yml` — release-please (Conventional Commits drive semver: `fix` → patch, `feat` → minor, breaking → minor pre-1.0), running as a GitHub App (`RELEASE_APP_CLIENT_ID` var, `RELEASE_APP_PRIVATE_KEY` secret). Release PRs are auto-approved (GITHUB_TOKEN) and auto-merged (App token) once CI passes, so merging a `feat`/`fix` ships a release. Merging tags `vX.Y.Z`; the build job signs with "Alembic Self-Signed" from the `ALEMBIC_SIGNING_P12_*` secrets and attaches `Alembic-X.Y.Z-macos-arm64.zip` + `.sha256`.
+- `main` ruleset: PR + passing `Build and check` required (0 approvals — sole maintainer; admin bypass).
 - Don't hand-edit the version: release-please updates `.release-please-manifest.json`, `CHANGELOG.md`, and `Info.plist` (`x-release-please-version` marker). Actions are pinned by commit SHA.
 
 ## Signing & TCC

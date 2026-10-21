@@ -51,10 +51,20 @@ and no window — look for the Alembic icon in the macOS menu bar.
   [release-please](https://github.com/googleapis/release-please): every push to `main`
   updates a release PR whose version and `CHANGELOG.md` come from Conventional Commits
   (`fix:` → patch, `feat:` → minor; before 1.0.0 a breaking change bumps minor).
-  Merging that PR tags `vX.Y.Z`, creates the GitHub Release, and a macOS job builds the
-  tag, signs it with the **Alembic Self-Signed** identity (same as local builds, so
-  permission grants survive updates), and attaches
-  `Alembic-X.Y.Z-macos-arm64.zip` plus its `.sha256`.
+  The release PR is **approved and set to auto-merge** automatically, so it merges as
+  soon as CI passes; that tags `vX.Y.Z`, creates the GitHub Release, and a macOS job
+  builds the tag, signs it with the **Alembic Self-Signed** identity (same as local
+  builds, so permission grants survive updates), and attaches
+  `Alembic-X.Y.Z-macos-arm64.zip` plus its `.sha256`. Net effect: merging a `feat`/`fix`
+  PR ships a release a few minutes later; `chore`/`ci`/`docs`-only changes don't.
+- release-please runs as a **GitHub App** (`vars.RELEASE_APP_CLIENT_ID`,
+  `secrets.RELEASE_APP_PRIVATE_KEY`; Contents + Pull requests write, installed on this
+  repo only). A PR's author can't approve it, and GITHUB_TOKEN-triggered events don't
+  start workflows, so the App opens release PRs (CI runs on them, `github-actions`
+  approves them) and enables auto-merge (so the merge cuts the release). To rotate,
+  generate a new private key in the App settings and update the secret.
+- `main` is protected by a ruleset: changes land through PRs with a passing
+  **Build and check**; approvals aren't required (sole maintainer), and admins can bypass.
 - Version source: `release-please-config.json` / `.release-please-manifest.json`; the
   `x-release-please-version` marker keeps `CFBundleShortVersionString` in `Info.plist` in
   sync. Release builds stamp it from the tag and set `CFBundleVersion` to the run number:
